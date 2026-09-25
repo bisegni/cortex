@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
-use cortex_core::{cosine, hash_embedding, subject, Signal};
+use cortex_core::{cosine, subject, Signal};
+mod neural;
+use neural::{fit, sensory_vector, NeuralNet};
 use futures::StreamExt;
 use std::collections::HashMap;
 use tokio::io::{self, AsyncBufReadExt};
@@ -31,7 +33,10 @@ async fn language(nc: async_nats::Client) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let text = line.trim();
         if text.is_empty() { continue; }
-        let emb = hash_embedding(text.as_bytes(), 16);
+        let x = sensory_vector(text.as_bytes(), 32);
+        let mut net = NeuralNet::new(32, 24, 16, 0x1A6E, 0.015);
+        for _ in 0..4 { net.train(&x, &fit(&x,16)); }
+        let (_, emb) = net.forward(&x);
         let id = stable_symbol("L", &emb);
         emit(&nc, "language", &Signal::new("language","activation",id,1.0,emb,Some(text.into()))).await?;
     }
@@ -45,7 +50,10 @@ async fn visual(nc: async_nats::Client) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let raw = line.trim();
         if raw.is_empty() { continue; }
-        let emb = hash_embedding(raw.as_bytes(), 16);
+        let x = sensory_vector(raw.as_bytes(), 32);
+        let mut net = NeuralNet::new(32, 32, 16, 0x715A1, 0.012);
+        for _ in 0..4 { net.train(&x, &fit(&x,16)); }
+        let (_, emb) = net.forward(&x);
         let id = stable_symbol("V", &emb);
         emit(&nc, "visual", &Signal::new("visual","primitive",id,1.0,emb,Some(raw.into()))).await?;
     }
@@ -55,9 +63,12 @@ async fn visual(nc: async_nats::Client) -> Result<()> {
 async fn perceptual(nc: async_nats::Client) -> Result<()> {
     let mut sub = nc.subscribe("cortex.visual.signal").await?;
     let mut prototypes: Vec<(String, Vec<f32>, u32)> = vec![];
+    let mut net=NeuralNet::new(16,24,16,0x9E2C,0.008);
     while let Some(msg) = sub.next().await {
         let s: Signal = serde_json::from_slice(&msg.payload)?;
-        let best = prototypes.iter().enumerate().map(|(i,(_,e,_))|(i,cosine(e,&s.embedding))).max_by(|a,b|a.1.total_cmp(&b.1));
+        net.train(&s.embedding,&s.embedding);
+        let (_,latent)=net.forward(&s.embedding);
+        let best = prototypes.iter().enumerate().map(|(i,(_,e,_))|(i,cosine(e,&latent))).max_by(|a,b|a.1.total_cmp(&b.1));
         let (symbol, idx) = match best {
             Some((i,score)) if score > 0.86 => (prototypes[i].0.clone(), Some(i)),
             _ => (format!("P{}", prototypes.len()+1), None),
@@ -65,10 +76,10 @@ async fn perceptual(nc: async_nats::Client) -> Result<()> {
         if let Some(i)=idx {
             let (_, e, count)=&mut prototypes[i];
             let c=*count as f32;
-            for (x,y) in e.iter_mut().zip(&s.embedding) { *x=(*x*c+*y)/(c+1.0); }
+            for (x,y) in e.iter_mut().zip(&latent) { *x=(*x*c+*y)/(c+1.0); }
             *count+=1;
-        } else { prototypes.push((symbol.clone(),s.embedding.clone(),1)); }
-        emit(&nc,"perceptual",&Signal::new("perceptual","stable",symbol,1.0,s.embedding,Some(s.symbol))).await?;
+        } else { prototypes.push((symbol.clone(),latent.clone(),1)); }
+        emit(&nc,"perceptual",&Signal::new("perceptual","stable",symbol,1.0,latent,Some(s.symbol))).await?;
     }
     Ok(())
 }
@@ -76,10 +87,14 @@ async fn perceptual(nc: async_nats::Client) -> Result<()> {
 async fn memory(nc: async_nats::Client) -> Result<()> {
     let mut sub = nc.subscribe("cortex.*.signal").await?;
     let mut recent: Vec<Signal> = vec![];
+    let mut net=NeuralNet::new(16,32,16,0x4D454D,0.006);
     while let Some(msg)=sub.next().await {
         let s: Signal=serde_json::from_slice(&msg.payload)?;
         if s.source=="memory" { continue; }
-        recent.push(s.clone());
+        let target=fit(&s.embedding,16); net.train(&target,&target);
+        let (_,mem)=net.forward(&target);
+        let mut stored=s.clone(); stored.embedding=mem;
+        recent.push(stored);
         if recent.len()>64 { recent.remove(0); }
         let related=recent.iter().rev().skip(1).find(|x| cosine(&x.embedding,&s.embedding)>0.90);
         if let Some(r)=related {
@@ -93,6 +108,7 @@ async fn associative(nc: async_nats::Client) -> Result<()> {
     let mut sub=nc.subscribe("cortex.*.signal").await?;
     let mut last: HashMap<String,Signal>=HashMap::new();
     let mut links: HashMap<(String,String),u32>=HashMap::new();
+    let mut net=NeuralNet::new(32,32,16,0xA550C,0.01);
     while let Some(msg)=sub.next().await {
         let s:Signal=serde_json::from_slice(&msg.payload)?;
         if s.source=="associative" || s.source=="workspace" { continue; }
@@ -102,7 +118,9 @@ async fn associative(nc: async_nats::Client) -> Result<()> {
                 let key=(other.symbol.clone(),s.symbol.clone());
                 let count=links.entry(key.clone()).or_default(); *count+=1;
                 if *count>=3 {
-                    let emb=s.embedding.iter().zip(&other.embedding).map(|(a,b)|(a+b)/2.0).collect();
+                    let mut pair=fit(&other.embedding,16); pair.extend(fit(&s.embedding,16));
+                    let target:Vec<f32>=(0..16).map(|i|(pair[i]+pair[i+16])*.5).collect(); net.train(&pair,&target);
+                    let (_,emb)=net.forward(&pair);
                     emit(&nc,"associative",&Signal::new("associative","association",format!("C:{}<->{}",key.0,key.1),(*count as f32/6.0).min(1.0),emb,Some(format!("co-activated {} times",count)))).await?;
                 }
             }

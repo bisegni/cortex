@@ -75,3 +75,9 @@ A first qualitative success is visible when repeated co-experience causes an ass
 ## Next experiment
 
 Replace the temporary visual sensor with a webcam and a small innate Metal feature extractor (edges, motion, color/texture, boundaries), while keeping the same NATS protocol. Then test symbol persistence under movement, rotation, occlusion and lighting changes.
+
+## Neural Seed-0 branch
+
+The `seed-0-neural` branch replaces the deterministic latent transforms with small, genuinely trainable neural networks. Visual and Language use independent sensory encoders; Perceptual learns a local latent before online symbol stabilization; Memory learns its own compressed recall representation; Associative learns a cross-cortex representation from paired activations. Training happens continuously inside each process from locally available signals. There is still no shared model and no central backpropagation.
+
+This remains a controlled prototype: the keyboard and visual text seam are temporary sensors. The next milestone is camera pixels -> Visual Cortex, ideally through Metal, while preserving the same independent-process/NATS architecture.

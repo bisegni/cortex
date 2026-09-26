@@ -74,7 +74,7 @@ async fn visual(nc: async_nats::Client) -> Result<()> {
 
 
 async fn perceptual(nc: async_nats::Client) -> Result<()> {
-    let mut sub = nc.subscribe("cortex.visual.signal").await?;
+    let mut sub = nc.subscribe("cortex.*.signal").await?;
     let mut prototypes: Vec<(String, Vec<f32>, u32)> = vec![];
     let mut net=NeuralNet::new(16,24,16,0x9E2C,0.008);
     while let Some(msg) = sub.next().await {
@@ -92,7 +92,11 @@ async fn perceptual(nc: async_nats::Client) -> Result<()> {
             for (x,y) in e.iter_mut().zip(&latent) { *x=(*x*c+*y)/(c+1.0); }
             *count+=1;
         } else { prototypes.push((symbol.clone(),latent.clone(),1)); }
-        emit(&nc,"perceptual",&Signal::new("perceptual","stable",symbol,1.0,latent,Some(s.symbol))).await?;
+        emit(&nc,"perceptual",&Signal::new("perceptual","stable",symbol.clone(),1.0,latent.clone(),Some(s.symbol))).await?;
+        if prediction.is_some() {
+            emit(&nc,"perceptual",&Signal::new("perceptual","prediction_error",format!("E:{symbol}"),surprise,latent,Some(format!("local surprise={surprise:.3}; plasticity x{modulation:.2}")))).await?;
+            prediction=None;
+        }
     }
     Ok(())
 }
@@ -134,7 +138,10 @@ async fn associative(nc: async_nats::Client) -> Result<()> {
                     let mut pair=fit(&other.embedding,16); pair.extend(fit(&s.embedding,16));
                     let target:Vec<f32>=(0..16).map(|i|(pair[i]+pair[i+16])*.5).collect(); net.train(&pair,&target);
                     let (_,emb)=net.forward(&pair);
-                    emit(&nc,"associative",&Signal::new("associative","association",format!("C:{}<->{}",key.0,key.1),(*count as f32/6.0).min(1.0),emb,Some(format!("co-activated {} times",count)))).await?;
+                    emit(&nc,"associative",&Signal::new("associative","association",format!("C:{}<->{}",key.0,key.1),(*count as f32/6.0).min(1.0),emb.clone(),Some(format!("co-activated {} times",count)))).await?;
+                    if other.source=="perceptual" || s.source=="perceptual" {
+                        emit(&nc,"associative",&Signal::new("associative","prediction",format!("PR:{}+{}",key.0,key.1),(*count as f32/8.0).min(1.0),emb,Some("top-down teaching signal for perceptual cortex; no gradient transport".into()))).await?;
+                    }
                 }
             }
         }

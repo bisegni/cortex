@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-mod neural;
+#[path = "../neural.rs"]\nmod neural;
 use neural::{fit, sensory_vector, NeuralNet};
 
 fn sample(seed:u64,n:usize)->Vec<f32>{

@@ -34,7 +34,7 @@ async fn language(nc: async_nats::Client) -> Result<()> {
         let text = line.trim();
         if text.is_empty() { continue; }
         let x = sensory_vector(text.as_bytes(), 32);
-        let mut net = NeuralNet::new(32, 24, 16, 0x1A6E, 0.015);
+        let mut net = NeuralNet::load_or_new("weights/cortex-0/language.bin",32,24,16,0x1A6E,0.015);
         for _ in 0..4 { net.train(&x, &fit(&x,16)); }
         let (_, emb) = net.forward(&x);
         let id = stable_symbol("L", &emb);
@@ -50,7 +50,7 @@ async fn visual(nc: async_nats::Client) -> Result<()> {
     let mut camera = Camera::new(CameraIndex::Index(index), requested)?;
     camera.open_stream()?;
     println!("Visual cortex: camera active. macOS may ask Terminal/tmux for Camera permission.");
-    let mut net = NeuralNet::new(64, 48, 16, 0x715A1, 0.006);
+    let mut net = NeuralNet::load_or_new("weights/cortex-0/visual.bin",64,48,16,0x715A1,0.006);
     loop {
         let frame = camera.frame()?;
         let decoded = frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;
@@ -76,7 +76,7 @@ async fn visual(nc: async_nats::Client) -> Result<()> {
 async fn perceptual(nc: async_nats::Client) -> Result<()> {
     let mut sub = nc.subscribe("cortex.*.signal").await?;
     let mut prototypes: Vec<(String, Vec<f32>, u32)> = vec![];
-    let mut net=NeuralNet::new(16,24,16,0x9E2C,0.008);
+    let mut net=NeuralNet::load_or_new("weights/cortex-0/perceptual.bin",16,24,16,0x9E2C,0.008);
     while let Some(msg) = sub.next().await {
         let s: Signal = serde_json::from_slice(&msg.payload)?;
         net.train(&s.embedding,&s.embedding);
@@ -104,7 +104,7 @@ async fn perceptual(nc: async_nats::Client) -> Result<()> {
 async fn memory(nc: async_nats::Client) -> Result<()> {
     let mut sub = nc.subscribe("cortex.*.signal").await?;
     let mut recent: Vec<Signal> = vec![];
-    let mut net=NeuralNet::new(16,32,16,0x4D454D,0.006);
+    let mut net=NeuralNet::load_or_new("weights/cortex-0/memory.bin",16,32,16,0x4D454D,0.006);
     while let Some(msg)=sub.next().await {
         let s: Signal=serde_json::from_slice(&msg.payload)?;
         if s.source=="memory" { continue; }
@@ -125,7 +125,7 @@ async fn associative(nc: async_nats::Client) -> Result<()> {
     let mut sub=nc.subscribe("cortex.*.signal").await?;
     let mut last: HashMap<String,Signal>=HashMap::new();
     let mut links: HashMap<(String,String),u32>=HashMap::new();
-    let mut net=NeuralNet::new(32,32,16,0xA550C,0.01);
+    let mut net=NeuralNet::load_or_new("weights/cortex-0/associative.bin",32,32,16,0xA550C,0.01);
     while let Some(msg)=sub.next().await {
         let s:Signal=serde_json::from_slice(&msg.payload)?;
         if s.source=="associative" || s.source=="workspace" { continue; }

@@ -1,16 +1,28 @@
 // Tiny continuously-plastic neural primitives for Seed-0.
 // Deliberately dependency-free: this is a real trainable network, not a hash encoder.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct NeuralNet {
     input: usize, hidden: usize, output: usize,
     w1: Vec<f32>, b1: Vec<f32>, w2: Vec<f32>, b2: Vec<f32>,
-    lr: f32,
+    lr: f32,\n    #[serde(default = "checkpoint_version")] version: u32,
 }
 impl NeuralNet {
     pub fn new(input:usize, hidden:usize, output:usize, seed:u64, lr:f32)->Self {
         let mut s=seed;
         let mut rnd=|| { s=s.wrapping_mul(6364136223846793005).wrapping_add(1); (((s>>32) as u32) as f32/u32::MAX as f32-.5)*.25 };
-        Self{input,hidden,output,w1:(0..input*hidden).map(|_|rnd()).collect(),b1:vec![0.;hidden],w2:(0..hidden*output).map(|_|rnd()).collect(),b2:vec![0.;output],lr}
+        Self{input,hidden,output,w1:(0..input*hidden).map(|_|rnd()).collect(),b1:vec![0.;hidden],w2:(0..hidden*output).map(|_|rnd()).collect(),b2:vec![0.;output],lr,version:checkpoint_version()}
+    }
+    pub fn load_or_new(path:&str,input:usize,hidden:usize,output:usize,seed:u64,lr:f32)->Self {
+        match std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok()) {
+            Some(mut net) if net.input==input && net.hidden==hidden && net.output==output => { net.lr=lr; eprintln!("loaded checkpoint {path}"); net },
+            Some(_) => { eprintln!("checkpoint {path} geometry mismatch; using fresh weights"); Self::new(input,hidden,output,seed,lr) },
+            None => Self::new(input,hidden,output,seed,lr),
+        }
+    }
+    pub fn save(&self,path:&str)->std::io::Result<()> {
+        if let Some(parent)=std::path::Path::new(path).parent(){std::fs::create_dir_all(parent)?;}
+        let bytes=serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        let tmp=format!("{path}.tmp"); std::fs::write(&tmp,bytes)?; std::fs::rename(tmp,path)
     }
     pub fn forward(&self,x:&[f32])->(Vec<f32>,Vec<f32>){
         let h=(0..self.hidden).map(|j| (self.b1[j]+(0..self.input).map(|i|x[i]*self.w1[j*self.input+i]).sum::<f32>()).tanh()).collect::<Vec<_>>();
@@ -35,3 +47,5 @@ pub fn sensory_vector(bytes:&[u8], dims:usize)->Vec<f32>{
     let n=x.iter().map(|v|v*v).sum::<f32>().sqrt().max(1e-6); for v in &mut x{*v/=n;} x
 }
 pub fn fit(v:&[f32],n:usize)->Vec<f32>{(0..n).map(|i|v.get(i%v.len()).copied().unwrap_or(0.)).collect()}
+
+fn checkpoint_version()->u32{1}

@@ -18,13 +18,14 @@ impl NeuralNet {
         (h,y)
     }
     // Local self-supervision: reconstruct a target latent. Each cortex learns only from signals it sees.
-    pub fn train(&mut self,x:&[f32],target:&[f32])->f32 {
+    pub fn train(&mut self,x:&[f32],target:&[f32])->f32 { self.train_modulated(x,target,1.0) }
+    pub fn train_modulated(&mut self,x:&[f32],target:&[f32],modulation:f32)->f32 {
         let (h,y)=self.forward(x); let mut dy=vec![0.;self.output]; let mut loss=0.;
         for k in 0..self.output { let e=y[k]-target[k]; loss+=e*e; dy[k]=2.*e/self.output as f32*(1.-y[k]*y[k]); }
         let mut dh=vec![0.;self.hidden];
         for j in 0..self.hidden { dh[j]=(0..self.output).map(|k|dy[k]*self.w2[k*self.hidden+j]).sum::<f32>()*(1.-h[j]*h[j]); }
-        for k in 0..self.output { for j in 0..self.hidden { self.w2[k*self.hidden+j]-=self.lr*dy[k]*h[j]; } self.b2[k]-=self.lr*dy[k]; }
-        for j in 0..self.hidden { for i in 0..self.input { self.w1[j*self.input+i]-=self.lr*dh[j]*x[i]; } self.b1[j]-=self.lr*dh[j]; }
+        for k in 0..self.output { for j in 0..self.hidden { self.w2[k*self.hidden+j]-=self.lr*modulation*dy[k]*h[j]; } self.b2[k]-=self.lr*modulation*dy[k]; }
+        for j in 0..self.hidden { for i in 0..self.input { self.w1[j*self.input+i]-=self.lr*modulation*dh[j]*x[i]; } self.b1[j]-=self.lr*modulation*dh[j]; }
         loss/self.output as f32
     }
 }

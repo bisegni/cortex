@@ -75,3 +75,10 @@ A first qualitative success is visible when repeated co-experience causes an ass
 ## Next experiment
 
 Replace the temporary visual sensor with a webcam and a small innate Metal feature extractor (edges, motion, color/texture, boundaries), while keeping the same NATS protocol. Then test symbol persistence under movement, rotation, occlusion and lighting changes.
+
+
+## Current main: webcam + tmux
+
+`main` now runs the trainable local cortical networks and feeds Visual Cortex from the native macOS camera. Install prerequisites with `brew install rust nats-server tmux`, then run `./scripts/run-seed0.sh`. It creates a `cortex` tmux session with NATS and each cortex in its own pane/window and opens the observer TUI. Detach with `Ctrl-b d`; reattach with `tmux attach -t cortex`; stop the entire brain with `./scripts/stop.sh`.
+
+On first camera use, macOS must grant Camera access to the terminal application that owns tmux. If camera 0 is not the intended device, launch with e.g. `CORTEX_CAMERA=1 ./scripts/run-seed0.sh`.

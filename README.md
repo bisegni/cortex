@@ -98,3 +98,9 @@ bash scripts/train-cortex0.sh
 Set `CORTEX_TRAIN_STEPS` to change the default 20,000 local updates per cortex. The pipeline trains Visual, Perceptual, Memory, Associative and Language sequentially and writes geometry-checked checkpoints under `weights/cortex-0/`. These files are deliberately ignored by git: they are learned artifacts, not source code. At runtime each cortex automatically loads its matching checkpoint and then remains locally plastic. Workspace is currently a selection mechanism and has no pretrained weights.
 
 The current trainer is a deterministic developmental bootstrap, not semantic supervised training: Visual/Perceptual/Memory learn generic signal transformations, Associative learns paired-symbol integration, and Language learns byte-pattern encoding. This validates the separate-development → checkpoint → collaborative-learning lifecycle while leaving semantic concepts to later experience.
+
+## Seed-0 sparse connectome
+
+Cortical communication is intentionally sparse rather than globally broadcast. Each innate projection has its own NATS subject, `cortex.<source>.to.<target>`, and carries a fixed-size cortical representation plus an explicit connection weight. The initial connectome permits only the minimum Visual→Perceptual, recurrent Perceptual/Memory/Associative loop, Language↔Associative path, and Workspace candidate/broadcast paths. Initial connection weights are neutral (1.0); later phases can learn gating and structural plasticity without changing the transport model.
+
+The observer TUI subscribes to `cortex.>` only for telemetry. It displays the brain areas, every permitted projection, its current weight, recent message rate, and a heat bar that becomes brighter as traffic increases. The observer never participates in cognition.

@@ -86,3 +86,15 @@ On first camera use, macOS must grant Camera access to the terminal application 
 ## Inter-cortical learning
 
 Cortex does **not** transport gradients between processes. Sensory processes provide afferent evidence. Internal cortices exchange representations and learned top-down predictions. Perceptual cortex compares a top-down prediction with the next sensory representation, emits a `prediction_error`, and uses the resulting surprise as a local plasticity modulator. Its own backpropagation remains entirely inside its network. Associative cortex learns co-activations and can emit `prediction` signals after a relation becomes recurrent. This deliberately separates inter-area teaching/modulation from local synaptic credit assignment and gives the TUI observable prediction/error events.
+
+## Cortex-0 developmental training
+
+Train each local cortex independently before starting the collaborative runtime:
+
+```bash
+bash scripts/train-cortex0.sh
+```
+
+Set `CORTEX_TRAIN_STEPS` to change the default 20,000 local updates per cortex. The pipeline trains Visual, Perceptual, Memory, Associative and Language sequentially and writes geometry-checked checkpoints under `weights/cortex-0/`. These files are deliberately ignored by git: they are learned artifacts, not source code. At runtime each cortex automatically loads its matching checkpoint and then remains locally plastic. Workspace is currently a selection mechanism and has no pretrained weights.
+
+The current trainer is a deterministic developmental bootstrap, not semantic supervised training: Visual/Perceptual/Memory learn generic signal transformations, Associative learns paired-symbol integration, and Language learns byte-pattern encoding. This validates the separate-development → checkpoint → collaborative-learning lifecycle while leaving semantic concepts to later experience.

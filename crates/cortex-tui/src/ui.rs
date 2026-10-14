@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, BorderType, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs},
     Frame,
 };
 
@@ -43,6 +43,7 @@ pub fn draw(f: &mut Frame, app: &App, sup: &Supervisor) {
         Tab::Brain => brain(f, rows[1], app),
         Tab::Chat => chat(f, rows[1], app),
         Tab::Camera => camera(f, rows[1], app, sup),
+        Tab::Teach => teach(f, rows[1], app, sup),
         Tab::Processes => processes(f, rows[1], app, sup),
         Tab::Train => train(f, rows[1], app, sup),
     }
@@ -68,9 +69,10 @@ fn header(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = match app.tab {
-        Tab::Brain => "1-5/Tab switch  R restart nodes  q quit",
-        Tab::Chat => "type + Enter to speak to the brain   F1-F5/Tab switch   Esc brain   Ctrl-C quit",
-        Tab::Camera => "1-5/Tab switch  R restart nodes  q quit",
+        Tab::Brain => "1-6/Tab switch  R restart nodes  q quit",
+        Tab::Chat => "type + Enter to speak to the brain   F1-F6/Tab switch   Esc brain   Ctrl-C quit",
+        Tab::Camera => "1-6/Tab switch  R restart nodes  q quit",
+        Tab::Teach => "t start/stop teacher  s speed  R restart nodes  q quit",
         Tab::Processes => "j/k select  Enter (re)start  x stop  R restart nodes  q quit",
         Tab::Train => "j/k choose  Enter train  R restart nodes (load new weights)  q quit",
     };
@@ -220,6 +222,7 @@ fn chat(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled("language cortex", Style::new().fg(Color::LightBlue).bold())),
         Line::from(neuron_strip(lang.map_or(&[][..], |s| &s.embedding))),
         Line::from(Span::styled(format!("symbol {}", lang.map_or("—", |s| s.symbol.as_str())), Style::new().fg(DIM))),
+        answer_line(app),
         Line::from(""),
         Line::from(Span::styled("last associations", Style::new().fg(Color::LightYellow).bold())),
     ];
@@ -285,9 +288,82 @@ fn camera(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
         Line::from(Span::styled("visual embedding (16)", Style::new().fg(Color::LightCyan).bold())),
         Line::from(neuron_strip(v.map_or(&[][..], |s| &s.embedding))),
         Line::from(Span::styled(format!("symbol {}", v.map_or("—", |s| s.symbol.as_str())), Style::new().fg(DIM))),
+        Line::from(""),
+        answer_line(app),
         Line::from(Span::styled(format!("{}", v.and_then(|s| app.signals.iter().find(|x| x.source == "visual").and_then(|x| x.context.clone()).filter(|_| s.count > 0)).unwrap_or_default()), Style::new().fg(DIM))),
     ];
     f.render_widget(Paragraph::new(side).block(panel(title("signal"))), cols[1]);
+}
+
+/// "I see: circle (82%)" for the most recent answer, fading out after a few seconds.
+fn answer_line(app: &App) -> Line<'static> {
+    match &app.last_answer {
+        Some((w, c, t)) if t.elapsed().as_secs() < 8 => Line::from(vec![
+            Span::styled("I see: ", Style::new().fg(DIM)),
+            Span::styled(w.clone(), Style::new().fg(Color::LightGreen).bold()),
+            Span::styled(format!(" ({:.0}%)", c * 100.0), Style::new().fg(DIM)),
+        ]),
+        _ => Line::from(Span::styled("I see: —", Style::new().fg(DIM))),
+    }
+}
+
+// ───────────────────────────── Teach ─────────────────────────────
+
+fn teach(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
+    let cols = Layout::horizontal([Constraint::Min(40), Constraint::Length(46)]).split(area);
+    let left = Layout::vertical([Constraint::Min(6), Constraint::Length(6)]).split(cols[0]);
+    let right = Layout::vertical([Constraint::Length(5), Constraint::Length(6), Constraint::Min(8)]).split(cols[1]);
+    let running = sup.procs[sup.teacher_index()].is_up();
+    let st = app.teacher.clone().unwrap_or_default();
+
+    let block = panel(title("what the brain is shown"));
+    let inner = block.inner(left[0]);
+    f.render_widget(block, left[0]);
+    if let (Some(fr), true) = (&app.frame, running) {
+        let lines = frame_lines(fr, inner.width as usize, inner.height as usize);
+        let w = lines.first().map_or(0, |l| l.width() as u16);
+        let r = Rect { x: inner.x + inner.width.saturating_sub(w) / 2, y: inner.y, width: w.min(inner.width), height: (lines.len() as u16).min(inner.height) };
+        f.render_widget(Paragraph::new(lines), r);
+    } else {
+        f.render_widget(Paragraph::new("Press t to start the automatic teacher.\nIt shows generated shapes with their names, then tests the brain on unseen ones.").style(Style::new().fg(DIM)).wrap(ratatui::widgets::Wrap { trim: true }), inner);
+    }
+
+    let verdict = if st.phase == "test" && !st.last_answer.is_empty() {
+        let ok = st.last_answer == st.class;
+        Span::styled(if ok { "✔ correct" } else { "✘ wrong" }, Style::new().fg(if ok { Color::LightGreen } else { Color::LightRed }).bold())
+    } else {
+        Span::raw("")
+    };
+    let info = vec![
+        Line::from(vec![Span::styled(format!("{:<8}", st.phase), Style::new().fg(Color::LightCyan).bold()), Span::raw(format!(" class: ")), Span::styled(st.class.clone(), Style::new().bold())]),
+        Line::from(vec![Span::raw("brain says: "), Span::styled(if st.last_answer.is_empty() { "—".to_string() } else { st.last_answer.clone() }, Style::new().fg(Color::LightGreen).bold()), Span::styled(format!(" ({:.0}%)  ", st.last_confidence * 100.0), Style::new().fg(DIM)), verdict]),
+        Line::from(Span::styled(format!("episode {}   speed x{}", st.episode, app.teach_speed), Style::new().fg(DIM))),
+    ];
+    f.render_widget(Paragraph::new(info).block(panel(title("teacher"))), left[1]);
+
+    let acc = st.accuracy.unwrap_or(0.0);
+    f.render_widget(
+        Gauge::default().block(panel(title(if running { "accuracy · last test round" } else { "accuracy · teacher stopped" })))
+            .gauge_style(Style::new().fg(if acc >= 0.8 { Color::LightGreen } else if acc >= 0.5 { Color::LightYellow } else { Color::LightRed }))
+            .ratio(acc as f64).label(st.accuracy.map_or("no test yet".to_string(), |a| format!("{:.0}%", a * 100.0))),
+        right[0],
+    );
+    let hist: Vec<u64> = st.history.iter().map(|a| (a * 100.0) as u64).collect();
+    f.render_widget(Sparkline::default().block(panel(title("accuracy per test round"))).data(&hist).max(100).style(Style::new().fg(Color::LightCyan)), right[1]);
+
+    let mut lines = vec![];
+    for (name, right_n, total) in &st.per_class {
+        let frac = if *total == 0 { 0.0 } else { *right_n as f32 / *total as f32 };
+        let n = (frac * 16.0).round() as usize;
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {name:<9}"), Style::new().fg(Color::Gray)),
+            Span::styled("█".repeat(n), Style::new().fg(if frac >= 0.8 { Color::LightGreen } else { Color::LightYellow })),
+            Span::styled("·".repeat(16 - n), Style::new().fg(DIM)),
+            Span::styled(format!(" {right_n}/{total}"), Style::new().fg(DIM)),
+        ]));
+    }
+    if lines.is_empty() { lines.push(Line::from(Span::styled(" waiting for the first test round…", Style::new().fg(DIM)))); }
+    f.render_widget(Paragraph::new(lines).block(panel(title("per class (all tests)"))), right[2]);
 }
 
 // ───────────────────────────── Processes / Train ─────────────────────────────
@@ -314,7 +390,7 @@ fn log_view(f: &mut Frame, area: Rect, p: &crate::supervisor::Proc, name: &str) 
 
 fn processes(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
     let cols = Layout::horizontal([Constraint::Length(36), Constraint::Min(30)]).split(area);
-    let items: Vec<ListItem> = sup.procs.iter().filter(|p| p.kind != Kind::Train).map(|p| {
+    let items: Vec<ListItem> = sup.procs.iter().filter(|p| !matches!(p.kind, Kind::Train | Kind::Teacher)).map(|p| {
         ListItem::new(Line::from(vec![Span::styled(format!("{:<13}", p.name), Style::new().fg(if let Kind::Node(n) = p.kind { cortex_color(n) } else { Color::White })), status_span(&p.status)]))
     }).collect();
     let mut state = ListState::default().with_selected(Some(app.selected_proc));

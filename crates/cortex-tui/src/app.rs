@@ -1,5 +1,5 @@
 //! Pure dashboard state, fed by NATS signals and camera frames.
-use cortex_core::{Frame, Signal};
+use cortex_core::{Answer, Frame, Signal, TeacherStatus};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 
 /// (name, input, hidden, output) of every cortex; matches the geometry in cortex-node.
@@ -11,18 +11,18 @@ pub const CORTICES: &[(&str, usize, usize, usize)] = &[
     ("language", 32, 24, 16),
     ("workspace", 16, 16, 16),
 ];
-pub const TRAIN_TARGETS: &[&str] = &["all", "visual", "perceptual", "memory", "associative", "language"];
+pub const TRAIN_TARGETS: &[&str] = &["curriculum", "all", "visual", "perceptual", "memory", "associative", "language"];
 const RATE_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Tab { Brain, Chat, Camera, Processes, Train }
+pub enum Tab { Brain, Chat, Camera, Teach, Processes, Train }
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Brain, Tab::Chat, Tab::Camera, Tab::Processes, Tab::Train];
+    pub const ALL: [Tab; 6] = [Tab::Brain, Tab::Chat, Tab::Camera, Tab::Teach, Tab::Processes, Tab::Train];
     pub fn title(self) -> &'static str {
-        match self { Tab::Brain => "Brain", Tab::Chat => "Chat", Tab::Camera => "Camera", Tab::Processes => "Processes", Tab::Train => "Train" }
+        match self { Tab::Brain => "Brain", Tab::Chat => "Chat", Tab::Camera => "Camera", Tab::Teach => "Teach", Tab::Processes => "Processes", Tab::Train => "Train" }
     }
     pub fn index(self) -> usize { Tab::ALL.iter().position(|t| *t == self).unwrap_or(0) }
-    pub fn step(self, d: isize) -> Tab { Tab::ALL[(self.index() as isize + d).rem_euclid(5) as usize] }
+    pub fn step(self, d: isize) -> Tab { Tab::ALL[(self.index() as isize + d).rem_euclid(6) as usize] }
 }
 
 pub enum Who { You, Brain(String), System }
@@ -55,6 +55,10 @@ pub struct App {
     pub train_sel: usize,
     pub started: Instant,
     pub quit_armed: bool,
+    pub teacher: Option<TeacherStatus>,
+    pub teacher_seen: Option<Instant>,
+    pub last_answer: Option<(String, f32, Instant)>,
+    pub teach_speed: u32,
     last_chat: HashMap<String, (String, Instant)>,
 }
 
@@ -64,7 +68,7 @@ impl App {
             tab: Tab::Brain, edges: HashMap::new(), cortex: HashMap::new(), signals: VecDeque::new(), thoughts: VecDeque::new(),
             chat: vec![ChatLine { who: Who::System, text: "Type a sentence and press Enter. The language cortex hears it; replies are what the brain broadcasts, recalls or associates.".into() }],
             input: String::new(), frame: None, frame_times: VecDeque::new(), last_frame: None, msg_times: VecDeque::new(),
-            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, last_chat: HashMap::new(),
+            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, last_chat: HashMap::new(),
         }
     }
 
@@ -104,6 +108,21 @@ impl App {
         }
     }
 
+    /// The brain's answer to "what do you see?". Shown in chat unless the teacher is running its own tests.
+    pub fn on_answer(&mut self, a: Answer) {
+        let now = Instant::now();
+        let teaching = self.teacher_seen.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+        if !teaching {
+            self.chat.push(ChatLine { who: Who::Brain("answer".into()), text: format!("I see: {}  ({:.0}% sure)", a.word, a.confidence * 100.0) });
+        }
+        self.last_answer = Some((a.word, a.confidence, now));
+    }
+
+    pub fn on_teacher(&mut self, t: TeacherStatus) {
+        self.teacher = Some(t);
+        self.teacher_seen = Some(Instant::now());
+    }
+
     pub fn on_frame(&mut self, f: Frame) {
         let now = Instant::now();
         self.frame = Some(f);
@@ -141,7 +160,7 @@ mod tests {
     use super::*;
 
     fn sig(src: &str, dst: &str, kind: &str, sym: &str) -> Signal {
-        Signal::new(src, dst, kind, sym.into(), 1.0, 1.0, vec![0.5; 16], Some("ctx".into()))
+        Signal::new(src, dst, kind, sym.into(), 1.0, 1.0, vec![0.5; 16], Some("ctx".into()), 3)
     }
 
     #[test]
@@ -163,6 +182,18 @@ mod tests {
         assert_eq!(a.chat.len(), base + 1);
         a.on_signal(sig("visual", "perceptual", "representation", "V1"));
         assert_eq!(a.chat.len(), base + 1);
+    }
+
+    #[test]
+    fn answer_goes_to_chat_unless_teacher_runs() {
+        let mut a = App::new();
+        let base = a.chat.len();
+        a.on_answer(Answer { word: "circle".into(), confidence: 0.8 });
+        assert_eq!(a.chat.len(), base + 1);
+        a.on_teacher(TeacherStatus::default());
+        a.on_answer(Answer { word: "square".into(), confidence: 0.5 });
+        assert_eq!(a.chat.len(), base + 1);
+        assert_eq!(a.last_answer.as_ref().map(|x| x.0.as_str()), Some("square"));
     }
 
     #[test]

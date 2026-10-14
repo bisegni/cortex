@@ -81,9 +81,18 @@ Replace the temporary visual sensor with a webcam and a small innate Metal featu
 
 `main` runs the trainable local cortical networks and feeds Visual Cortex from the native macOS camera. Install prerequisites with `brew install rust nats-server`, then run `./scripts/run-seed0.sh`. It builds the workspace and opens the `cortex-tui` dashboard, which starts and supervises `nats-server` (an already-running server on the same port is reused) and every cortex node as child processes. Quitting the dashboard stops them all.
 
-Tabs (`1`-`5`, `Tab`, or `F1`-`F5`): **Brain** (connectome heat, per-cortex neuron activity, workspace stream), **Chat** (type text to the language cortex; brain broadcasts, recalls and associations appear as replies), **Camera** (live downsampled webcam frame from the visual cortex), **Processes** (status, logs, restart/stop), **Train** (run `cortex-train` and view output; press `R` to restart the nodes and load new weights). `q` twice quits; `Ctrl-C` quits immediately.
+Tabs (`1`-`6`, `Tab`, or `F1`-`F6`): **Brain** (connectome heat, per-cortex neuron activity, workspace stream), **Chat** (type text to the language cortex; brain broadcasts, recalls and associations appear as replies), **Camera** (live downsampled webcam frame from the visual cortex), **Teach** (automatic teacher with live accuracy), **Processes** (status, logs, restart/stop), **Train** (run `cortex-train` and view output; press `R` to restart the nodes and load new weights). `q` twice quits; `Ctrl-C` quits immediately.
 
 On first camera use, macOS must grant Camera access to the terminal application running the dashboard. If camera 0 is not the intended device, launch with e.g. `CORTEX_CAMERA=1 ./scripts/run-seed0.sh`. Text can also be sent from any shell with `nats pub cortex.input.text "hello"`.
+
+### Teaching the brain to name what it sees
+
+Signals carry a `ttl` (remaining relay hops) so a stimulus produces a bounded cascade instead of endless echo. The visual cortex uses a fixed innate "retina" (`cortex-core/src/curriculum.rs`: shape summary, width/height profiles, stripe texture) and learns a 16-dim latent from it. The associative cortex links image latents to words Hebbian-style (nearest-prototype vote, persisted in `weights/cortex-0/links.json`). The language cortex publishes the result on `cortex.answer`.
+
+1. **Offline pretrain** (optional but recommended): `cargo run -p cortex-node --bin cortex-train -- curriculum` (or the Train tab) trains visual, perceptual and language nets on generated shapes (`circle square triangle cross hbars vbars`).
+2. **Automatic teacher**: Teach tab, press `t`. It says a class name on `cortex.input.text` while injecting generated images on `cortex.visual.inject`, and periodically tests unseen images without the word, scoring the answers.
+3. **Headless check**: with nats-server and all nodes running, `cargo run -p cortex-node --bin cortex-teacher -- --headless --episodes 120 --target 0.8` prints per-class accuracy and exits non-zero below target. Set `CORTEX_CAMERA=off` on the visual node to keep the camera out of the test.
+4. **Teach it yourself**: show the camera an object and type its name in Chat; later show it again and the answer appears as "I see: ...".
 
 ## Inter-cortical learning
 

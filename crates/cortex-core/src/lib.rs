@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+pub mod curriculum;
+
 pub const SYMBOL_DIMS: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
@@ -30,15 +32,38 @@ pub struct Signal {
     pub id: Uuid, pub source: String, pub target: String, pub kind: String,
     pub symbol: String, pub activation: f32, pub connection_weight: f32,
     pub embedding: Vec<f32>, pub context: Option<String>, pub timestamp_ms: u128,
+    /// Remaining relay hops: a node that receives ttl 0 must not emit further signals.
+    #[serde(default)] pub ttl: u8,
 }
 impl Signal {
-    pub fn new(source:&str,target:&str,kind:&str,symbol:String,activation:f32,connection_weight:f32,embedding:Vec<f32>,context:Option<String>)->Self{
+    pub fn new(source:&str,target:&str,kind:&str,symbol:String,activation:f32,connection_weight:f32,embedding:Vec<f32>,context:Option<String>,ttl:u8)->Self{
         Self{id:Uuid::new_v4(),source:source.into(),target:target.into(),kind:kind.into(),symbol,activation,connection_weight,embedding,context,
-        timestamp_ms:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}
+        timestamp_ms:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),ttl}
     }
 }
 pub const INPUT_TEXT: &str = "cortex.input.text";
 pub const FRAME_SUBJECT: &str = "cortex.visual.frame";
+/// Frames published here replace the camera (used by the teacher).
+pub const INJECT_SUBJECT: &str = "cortex.visual.inject";
+pub const ANSWER_SUBJECT: &str = "cortex.answer";
+pub const TEACHER_STATUS_SUBJECT: &str = "cortex.teacher.status";
+
+/// What the brain says it sees, published by the language cortex.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Answer { pub word: String, pub confidence: f32 }
+
+/// Teacher progress, published for the dashboard.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TeacherStatus {
+    pub phase: String, pub class: String, pub episode: u32,
+    /// Accuracy of the latest completed test round (0..1), if any.
+    pub accuracy: Option<f32>,
+    /// (class, right, total) accumulated over all test rounds.
+    pub per_class: Vec<(String, u32, u32)>,
+    pub last_answer: String, pub last_confidence: f32,
+    /// Accuracy of every completed test round.
+    pub history: Vec<f32>,
+}
 
 /// Downsampled grayscale camera frame published by the visual cortex for observers.
 #[derive(Debug, Clone, Serialize, Deserialize)]

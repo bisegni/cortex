@@ -50,3 +50,21 @@ pub fn sensory_vector(bytes:&[u8], dims:usize)->Vec<f32>{
 pub fn fit(v:&[f32],n:usize)->Vec<f32>{(0..n).map(|i|v.get(i%v.len()).copied().unwrap_or(0.)).collect()}
 
 fn checkpoint_version()->u32{1}
+
+/// Persist a net at most every 10 s so online learning survives restarts.
+pub fn autosave(net:&NeuralNet,path:&str,last:&mut std::time::Instant){
+    if last.elapsed()>=std::time::Duration::from_secs(10){ let _=net.save(path); *last=std::time::Instant::now(); }
+}
+
+/// Online clustering of latent vectors into stable prototype ids.
+#[derive(Default)]
+pub struct Prototypes(Vec<(Vec<f32>,u32)>);
+impl Prototypes {
+    pub fn assign(&mut self,emb:&[f32])->usize{
+        let best=self.0.iter().enumerate().map(|(i,(e,_))|(i,cortex_core::cosine(e,emb))).max_by(|a,b|a.1.total_cmp(&b.1));
+        match best {
+            Some((i,score)) if score>0.86 => { let (e,n)=&mut self.0[i]; let c=*n as f32; for (x,y) in e.iter_mut().zip(emb){*x=(*x*c+*y)/(c+1.0)} *n+=1; i },
+            _ => { self.0.push((emb.to_vec(),1)); self.0.len()-1 },
+        }
+    }
+}

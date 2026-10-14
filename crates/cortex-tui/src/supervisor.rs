@@ -26,6 +26,7 @@ pub enum Kind {
     Nats,
     Node(&'static str),
     Train,
+    Teacher,
 }
 
 enum Ev {
@@ -80,12 +81,17 @@ impl Supervisor {
         let mut procs = vec![Proc::new("nats-server", Kind::Nats)];
         procs.extend(NODE_ROLES.iter().map(|r| Proc::new(r, Kind::Node(r))));
         procs.push(Proc::new("train", Kind::Train));
+        procs.push(Proc::new("teacher", Kind::Teacher));
         let nats_addr = std::env::var("NATS_URL").unwrap_or_else(|_| "127.0.0.1:4222".into());
         let nats_addr = nats_addr.trim_start_matches("nats://").to_string();
         Self { procs, tx, rx, bin_dir, root, nats_addr }
     }
 
     pub fn train_index(&self) -> usize {
+        self.procs.len() - 2
+    }
+
+    pub fn teacher_index(&self) -> usize {
         self.procs.len() - 1
     }
 
@@ -129,6 +135,7 @@ impl Supervisor {
             Kind::Nats => (PathBuf::from("nats-server"), vec![]),
             Kind::Node(role) => (self.bin_dir.join("cortex-node"), vec![role.to_string()]),
             Kind::Train => (self.bin_dir.join("cortex-train"), args),
+            Kind::Teacher => (self.bin_dir.join("cortex-teacher"), args),
         };
         let mut cmd = Command::new(&program);
         cmd.args(&args).current_dir(&self.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -207,7 +214,7 @@ impl Supervisor {
     }
 
     pub fn running(&self) -> usize {
-        self.procs.iter().filter(|p| p.is_up() && p.kind != Kind::Train).count()
+        self.procs.iter().filter(|p| p.is_up() && !matches!(p.kind, Kind::Train | Kind::Teacher)).count()
     }
 }
 

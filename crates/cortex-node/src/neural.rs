@@ -4,12 +4,13 @@
 pub struct NeuralNet {
     input: usize, hidden: usize, output: usize,
     w1: Vec<f32>, b1: Vec<f32>, w2: Vec<f32>, b2: Vec<f32>,
-    lr: f32,\n    #[serde(default = "checkpoint_version")] version: u32,
+    lr: f32,
+    #[serde(default = "checkpoint_version")] version: u32,
 }
 impl NeuralNet {
     pub fn new(input:usize, hidden:usize, output:usize, seed:u64, lr:f32)->Self {
         let mut s=seed;
-        let mut rnd=|| { s=s.wrapping_mul(6364136223846793005).wrapping_add(1); (((s>>32) as u32) as f32/u32::MAX as f32-.5)*.25 };
+        let mut rnd=|| { s=s.wrapping_mul(6364136223846793005).wrapping_add(1); (((s>>32) as u32) as f32/u32::MAX as f32-0.5)*0.25 };
         Self{input,hidden,output,w1:(0..input*hidden).map(|_|rnd()).collect(),b1:vec![0.;hidden],w2:(0..hidden*output).map(|_|rnd()).collect(),b2:vec![0.;output],lr,version:checkpoint_version()}
     }
     pub fn load_or_new(path:&str,input:usize,hidden:usize,output:usize,seed:u64,lr:f32)->Self {

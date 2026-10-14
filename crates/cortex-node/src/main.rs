@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use cortex_core::{cosine, incoming_subject, outgoing, subject, Signal};
+use cortex_core::{cosine, incoming_subject, outgoing, subject, Frame, Signal, FRAME_SUBJECT, INPUT_TEXT};
 use futures::StreamExt;
 use nokhwa::{Camera, utils::{CameraIndex, RequestedFormat, RequestedFormatType}};
 use std::collections::HashMap;
@@ -25,13 +25,21 @@ async fn emit(nc:&async_nats::Client,source:&str,kind:&str,symbol:String,activat
 }
 async fn language(nc:async_nats::Client)->Result<()>{
     let mut sub=nc.subscribe(incoming_subject("language")).await?;
-    let mut lines=io::BufReader::new(io::stdin()).lines();
+    let mut text_in=nc.subscribe(INPUT_TEXT).await?;
+    let mut lines=io::BufReader::new(io::stdin()).lines();let mut stdin_open=true;
     let mut net=NeuralNet::load_or_new("weights/cortex-0/language.bin",32,24,16,0x1A6E,0.015);
-    println!("Language cortex: input text here; associative feedback is also connected.");
+    println!("Language cortex: text via stdin or {INPUT_TEXT}; associative feedback is also connected.");
     loop{tokio::select!{
-        line=lines.next_line()=>{if let Some(line)=line?{let text=line.trim();if !text.is_empty(){let x=sensory_vector(text.as_bytes(),32);for _ in 0..4{net.train(&x,&fit(&x,16));}let(_,emb)=net.forward(&x);let id=stable_symbol("L",&emb);emit(&nc,"language","representation",id,1.0,emb,Some(text.into())).await?;}}},
+        line=lines.next_line(),if stdin_open=>{match line?{Some(line)=>hear(&nc,&mut net,&line).await?,None=>stdin_open=false}},
+        msg=text_in.next()=>{if let Some(msg)=msg{hear(&nc,&mut net,&String::from_utf8_lossy(&msg.payload)).await?;}},
         msg=sub.next()=>{if let Some(msg)=msg{let s:Signal=serde_json::from_slice(&msg.payload)?;let x=fit(&s.embedding,32);net.train_modulated(&x,&fit(&x,16),s.connection_weight);}}
     }}
+}
+async fn hear(nc:&async_nats::Client,net:&mut NeuralNet,line:&str)->Result<()>{
+    let text=line.trim();if text.is_empty(){return Ok(())}
+    let x=sensory_vector(text.as_bytes(),32);for _ in 0..4{net.train(&x,&fit(&x,16));}
+    let(_,emb)=net.forward(&x);let id=stable_symbol("L",&emb);
+    emit(nc,"language","representation",id,1.0,emb,Some(text.into())).await
 }
 async fn visual(nc:async_nats::Client)->Result<()>{
     let index=std::env::var("CORTEX_CAMERA").ok().and_then(|v|v.parse::<u32>().ok()).unwrap_or(0);
@@ -40,10 +48,17 @@ async fn visual(nc:async_nats::Client)->Result<()>{
     let mut net=NeuralNet::load_or_new("weights/cortex-0/visual.bin",64,48,16,0x715A1,0.006);
     loop{let frame=camera.frame()?;let decoded=frame.decode_image::<nokhwa::pixel_format::RgbFormat>()?;let raw=decoded.as_raw();if raw.is_empty(){continue}
         let mut x=Vec::with_capacity(64);let stride=(raw.len()/3/64).max(1);
-        for p in(0..raw.len()/3).step_by(stride).take(64){let i=p*3;x.push((raw[i]as f32*.299+raw[i+1]as f32*.587+raw[i+2]as f32*.114)/127.5-1.0);}
+        for p in(0..raw.len()/3).step_by(stride).take(64){let i=p*3;x.push((raw[i]as f32*0.299+raw[i+1]as f32*0.587+raw[i+2]as f32*0.114)/127.5-1.0);}
+        publish_frame(&nc,raw,decoded.width()as usize,decoded.height()as usize).await?;
         while x.len()<64{x.push(0.0)}net.train(&x,&fit(&x,16));let(_,emb)=net.forward(&x);let id=stable_symbol("V",&emb);
         emit(&nc,"visual","representation",id,1.0,emb,Some(format!("camera:{index} {}x{}",decoded.width(),decoded.height()))).await?;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;}
+}
+async fn publish_frame(nc:&async_nats::Client,rgb:&[u8],w:usize,h:usize)->Result<()>{
+    if w==0||h==0||rgb.len()<w*h*3{return Ok(())}
+    let(ow,oh)=(64usize,32usize);let mut gray=Vec::with_capacity(ow*oh);
+    for oy in 0..oh{for ox in 0..ow{let i=((oy*h/oh)*w+ox*w/ow)*3;gray.push((rgb[i]as f32*0.299+rgb[i+1]as f32*0.587+rgb[i+2]as f32*0.114)as u8);}}
+    nc.publish(FRAME_SUBJECT,serde_json::to_vec(&Frame{width:ow,height:oh,gray})?.into()).await?;Ok(())
 }
 async fn perceptual(nc:async_nats::Client)->Result<()>{
     let mut sub=nc.subscribe(incoming_subject("perceptual")).await?;let mut prototypes:Vec<(String,Vec<f32>,u32)>=vec![];
@@ -71,7 +86,7 @@ async fn associative(nc:async_nats::Client)->Result<()>{
     let mut net=NeuralNet::load_or_new("weights/cortex-0/associative.bin",32,32,16,0xA550C,0.01);
     while let Some(msg)=sub.next().await{let s:Signal=serde_json::from_slice(&msg.payload)?;if s.source=="workspace"{continue}
         for other in last.values(){if other.source!=s.source&&s.timestamp_ms.abs_diff(other.timestamp_ms)<2500{let key=(other.symbol.clone(),s.symbol.clone());let count=links.entry(key.clone()).or_default();*count+=1;
-            if *count>=3{let mut pair=fit(&other.embedding,16);pair.extend(fit(&s.embedding,16));let target=(0..16).map(|i|(pair[i]+pair[i+16])*.5).collect::<Vec<_>>();
+            if *count>=3{let mut pair=fit(&other.embedding,16);pair.extend(fit(&s.embedding,16));let target=(0..16).map(|i|(pair[i]+pair[i+16])*0.5).collect::<Vec<_>>();
                 net.train_modulated(&pair,&target,s.connection_weight);let(_,emb)=net.forward(&pair);emit(&nc,"associative","association",format!("C:{}<->{}",key.0,key.1),(*count as f32/6.0).min(1.0),emb,Some(format!("co-activated {} times",count))).await?;}}}
         last.insert(s.source.clone(),s);
     }Ok(())

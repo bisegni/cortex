@@ -9,7 +9,7 @@ Seed-0 tests one question: **can local symbols and cross-cortex associations eme
 ```text
  visual sensor ─> Visual Cortex ─┐
                                 │
- keyboard ──────> Language ─────┼──── NATS signal bus ──── TUI observer
+ keyboard ──────> Language ─────┼──── NATS signal bus ──── TUI dashboard
                                 │          │
                                 │    ┌─────┼──────────┐
                                 │    v     v          v
@@ -20,7 +20,7 @@ Seed-0 tests one question: **can local symbols and cross-cortex associations eme
                                                 Global Workspace
 ```
 
-Every cortex is a **separate macOS process** with local state and a local symbol namespace. NATS transports signals only; it contains no cognition and does not orchestrate a pipeline. The TUI is an observer.
+Every cortex is a **separate macOS process** with local state and a local symbol namespace. NATS transports signals only; it contains no cognition and does not orchestrate a pipeline. The TUI supervises processes and observes signals; it takes no part in cognition.
 
 Seed-0 intentionally uses tiny deterministic latent encoders instead of pretending they are already useful neural networks. That makes the architecture, symbol formation, temporal binding, memory and association loop testable before Metal models are introduced.
 
@@ -77,11 +77,13 @@ A first qualitative success is visible when repeated co-experience causes an ass
 Replace the temporary visual sensor with a webcam and a small innate Metal feature extractor (edges, motion, color/texture, boundaries), while keeping the same NATS protocol. Then test symbol persistence under movement, rotation, occlusion and lighting changes.
 
 
-## Current main: webcam + tmux
+## Current main: webcam + dashboard
 
-`main` now runs the trainable local cortical networks and feeds Visual Cortex from the native macOS camera. Install prerequisites with `brew install rust nats-server tmux`, then run `./scripts/run-seed0.sh`. It creates a `cortex` tmux session with NATS and each cortex in its own pane/window and opens the observer TUI. Detach with `Ctrl-b d`; reattach with `tmux attach -t cortex`; stop the entire brain with `./scripts/stop.sh`.
+`main` runs the trainable local cortical networks and feeds Visual Cortex from the native macOS camera. Install prerequisites with `brew install rust nats-server`, then run `./scripts/run-seed0.sh`. It builds the workspace and opens the `cortex-tui` dashboard, which starts and supervises `nats-server` (an already-running server on the same port is reused) and every cortex node as child processes. Quitting the dashboard stops them all.
 
-On first camera use, macOS must grant Camera access to the terminal application that owns tmux. If camera 0 is not the intended device, launch with e.g. `CORTEX_CAMERA=1 ./scripts/run-seed0.sh`.
+Tabs (`1`-`5`, `Tab`, or `F1`-`F5`): **Brain** (connectome heat, per-cortex neuron activity, workspace stream), **Chat** (type text to the language cortex; brain broadcasts, recalls and associations appear as replies), **Camera** (live downsampled webcam frame from the visual cortex), **Processes** (status, logs, restart/stop), **Train** (run `cortex-train` and view output; press `R` to restart the nodes and load new weights). `q` twice quits; `Ctrl-C` quits immediately.
+
+On first camera use, macOS must grant Camera access to the terminal application running the dashboard. If camera 0 is not the intended device, launch with e.g. `CORTEX_CAMERA=1 ./scripts/run-seed0.sh`. Text can also be sent from any shell with `nats pub cortex.input.text "hello"`.
 
 ## Inter-cortical learning
 

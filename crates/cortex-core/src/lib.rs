@@ -37,9 +37,16 @@ impl Signal {
         timestamp_ms:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}
     }
 }
+pub const INPUT_TEXT: &str = "cortex.input.text";
+pub const FRAME_SUBJECT: &str = "cortex.visual.frame";
+
+/// Downsampled grayscale camera frame published by the visual cortex for observers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame { pub width: usize, pub height: usize, pub gray: Vec<u8> }
+
 pub fn subject(source:&str,target:&str)->String { format!("cortex.{source}.to.{target}") }
 pub fn incoming_subject(target:&str)->String { format!("cortex.*.to.{target}") }
-pub fn outgoing(source:&str)->impl Iterator<Item=&'static Connection>{CONNECTOME.iter().filter(move|c|c.source==source)}
+pub fn outgoing(source:&str)->impl Iterator<Item=&'static Connection>+'_{CONNECTOME.iter().filter(move|c|c.source==source)}
 pub fn cosine(a:&[f32],b:&[f32])->f32{
     let n=a.len().min(b.len()); if n==0{return 0.0}
     let (mut dot,mut aa,mut bb)=(0.0,0.0,0.0);

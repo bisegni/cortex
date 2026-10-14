@@ -1,48 +1,135 @@
-use anyhow::Result;
-use cortex_core::{Signal,CONNECTOME};
-use crossterm::{event::{self,Event,KeyCode},execute,terminal::{disable_raw_mode,enable_raw_mode,EnterAlternateScreen,LeaveAlternateScreen}};
-use futures::StreamExt;
-use ratatui::{backend::CrosstermBackend,layout::{Constraint,Direction,Layout},style::{Color,Modifier,Style},text::{Line,Span},widgets::{Block,Borders,Paragraph},Terminal};
-use std::{collections::{HashMap,VecDeque},io,time::{Duration,Instant}};
+mod app;
+mod supervisor;
+mod ui;
 
-struct EdgeActivity{events:VecDeque<Instant>,last_weight:f32}
-fn heat(rate:f32)->Color{if rate>15.0{Color::LightRed}else if rate>7.0{Color::LightYellow}else if rate>2.0{Color::LightGreen}else if rate>0.0{Color::Cyan}else{Color::DarkGray}}
-fn bar(rate:f32)->String{let n=((rate/2.0).ceil()as usize).min(12);format!("{}{}","█".repeat(n),"·".repeat(12-n))}
+use anyhow::{Context, Result};
+use app::{App, Tab, Who, TRAIN_TARGETS};
+use cortex_core::{Frame, Signal, FRAME_SUBJECT, INPUT_TEXT};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::StreamExt;
+use std::time::Duration;
+use supervisor::{Kind, Supervisor};
+
 #[tokio::main]
-async fn main()->Result<()>{
- let nc=async_nats::connect(std::env::var("NATS_URL").unwrap_or_else(|_|"127.0.0.1:4222".into())).await?;
- let mut sub=nc.subscribe("cortex.>").await?;enable_raw_mode()?;let mut out=io::stdout();execute!(out,EnterAlternateScreen)?;
- let mut term=Terminal::new(CrosstermBackend::new(out))?;let mut edges:HashMap<(String,String),EdgeActivity>=HashMap::new();let mut log:VecDeque<Signal>=VecDeque::new();
- loop{
-  while let Ok(Some(msg))=tokio::time::timeout(Duration::from_millis(1),sub.next()).await{if let Ok(s)=serde_json::from_slice::<Signal>(&msg.payload){
-   let e=edges.entry((s.source.clone(),s.target.clone())).or_insert(EdgeActivity{events:VecDeque::new(),last_weight:s.connection_weight});e.events.push_back(Instant::now());e.last_weight=s.connection_weight;
-   log.push_front(s);if log.len()>12{log.pop_back();}
-  }}
-  let now=Instant::now();for e in edges.values_mut(){while e.events.front().is_some_and(|t|now.duration_since(*t)>Duration::from_secs(3)){e.events.pop_front();}}
-  term.draw(|f|{
-   let rows=Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(11),Constraint::Min(10),Constraint::Length(5),Constraint::Length(1)]).split(f.area());
-   let brain=vec![
-    Line::from(vec![Span::styled("                         ┌──────────────┐",Style::default().fg(Color::DarkGray))]),
-    Line::from(vec![Span::raw("  CAMERA ─────► "),Span::styled("VISUAL",Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),Span::raw(" ─────► "),Span::styled("PERCEPTUAL",Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),Span::raw(" ◄─────┐")]),
-    Line::from("                                      │        │"),
-    Line::from(vec![Span::raw("                         ┌────────────┼────────┐")]),
-    Line::from(vec![Span::raw("                         ▼            ▼        │")]),
-    Line::from(vec![Span::raw("                      "),Span::styled("MEMORY",Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)),Span::raw(" ◄────► "),Span::styled("ASSOCIATIVE",Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),Span::raw(" ─┘")]),
-    Line::from(vec![Span::raw("                         ▲             ▲  │")]),
-    Line::from(vec![Span::raw("                         │             │  ▼")]),
-    Line::from(vec![Span::raw("                      "),Span::styled("WORKSPACE",Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),Span::raw("       "),Span::styled("LANGUAGE",Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD))]),
-   ];
-   f.render_widget(Paragraph::new(brain).block(Block::default().title(" CORTEX — sparse connectome ").borders(Borders::ALL)),rows[0]);
-   let mut lines=vec![Line::from(vec![Span::styled(" projection                    weight   traffic/3s    activity",Style::default().add_modifier(Modifier::BOLD))])];
-   for c in CONNECTOME{let key=(c.source.to_string(),c.target.to_string());let e=edges.get(&key);let rate=e.map(|x|x.events.len()as f32/3.0).unwrap_or(0.0);let weight=e.map(|x|x.last_weight).unwrap_or(c.weight);let color=heat(rate);
-    lines.push(Line::from(vec![Span::styled(format!(" {:<11} → {:<11}",c.source,c.target),Style::default().fg(color)),Span::raw(format!("   {:>4.2}     {:>6.1}/s    ",weight,rate)),Span::styled(bar(rate),Style::default().fg(color).add_modifier(if rate>7.0{Modifier::BOLD}else{Modifier::empty()}))]));
-   }
-   f.render_widget(Paragraph::new(lines).block(Block::default().title(" Connections — brighter = more recent traffic ").borders(Borders::ALL)),rows[1]);
-   let stream=log.iter().take(3).map(|s|Line::from(vec![Span::styled(format!("{:<11}",s.source),Style::default().fg(Color::Cyan)),Span::raw(" → "),Span::styled(format!("{:<11}",s.target),Style::default().fg(Color::LightGreen)),Span::raw(format!(" {:<14} {}  a={:.2}",s.kind,s.symbol,s.activation))])).collect::<Vec<_>>();
-   f.render_widget(Paragraph::new(stream).block(Block::default().title(" Latest signals ").borders(Borders::ALL)),rows[2]);
-   f.render_widget(Paragraph::new(" q quit   |   weight = connection strength   |   traffic = observed messages/sec over last 3s"),rows[3]);
-  })?;
-  if event::poll(Duration::from_millis(40))?{if let Event::Key(k)=event::read()?{if k.code==KeyCode::Char('q'){break}}}
- }
- disable_raw_mode()?;execute!(term.backend_mut(),LeaveAlternateScreen)?;term.show_cursor()?;Ok(())
+async fn main() -> Result<()> {
+    let mut sup = Supervisor::new();
+    eprintln!("cortex: starting nats-server and cortex nodes…");
+    sup.start_all().await;
+    let url = std::env::var("NATS_URL").unwrap_or_else(|_| "127.0.0.1:4222".into());
+    // The connectome loops generate far more signals than the UI can paint; a deep queue plus a
+    // dedicated frame subscription keeps rare camera frames from being dropped as slow-consumer overflow.
+    let nc = match async_nats::ConnectOptions::new().subscription_capacity(65536).connect(&url).await {
+        Ok(nc) => nc,
+        Err(e) => {
+            sup.shutdown().await;
+            return Err(e).context(format!("cannot reach NATS at {url} (is nats-server installed? brew install nats-server)"));
+        }
+    };
+    let mut sub = nc.subscribe("cortex.>").await?;
+    let mut frames = nc.subscribe(FRAME_SUBJECT).await?;
+
+    // ratatui::init installs a panic hook that restores the terminal.
+    let mut term = ratatui::init();
+    let result = run(&mut term, &mut sup, &nc, &mut sub, &mut frames).await;
+    ratatui::restore();
+    sup.shutdown().await;
+    result
+}
+
+async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &async_nats::Client, sub: &mut async_nats::Subscriber, frames: &mut async_nats::Subscriber) -> Result<()> {
+    let mut app = App::new();
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                sup.poll();
+                app.tick();
+                term.draw(|f| ui::draw(f, &app, sup))?;
+            }
+            msg = sub.next() => {
+                let Some(msg) = msg else { break };
+                if msg.subject.as_str() == FRAME_SUBJECT { continue }
+                if let Ok(s) = serde_json::from_slice::<Signal>(&msg.payload) {
+                    app.on_signal(s);
+                }
+            }
+            msg = frames.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(fr) = serde_json::from_slice::<Frame>(&msg.payload) { app.on_frame(fr); }
+            }
+            ev = events.next() => {
+                let Some(ev) = ev else { break };
+                if let Event::Key(k) = ev? {
+                    if k.kind != KeyEventKind::Release && handle_key(&mut app, sup, nc, k).await { break; }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true when the dashboard should exit.
+async fn handle_key(app: &mut App, sup: &mut Supervisor, nc: &async_nats::Client, k: KeyEvent) -> bool {
+    if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+        return true;
+    }
+    match k.code {
+        KeyCode::Tab => { app.tab = app.tab.step(1); return false; }
+        KeyCode::BackTab => { app.tab = app.tab.step(-1); return false; }
+        KeyCode::F(n @ 1..=5) => { app.tab = Tab::ALL[n as usize - 1]; return false; }
+        _ => {}
+    }
+    if app.tab == Tab::Chat {
+        match k.code {
+            KeyCode::Esc => app.tab = Tab::Brain,
+            KeyCode::Backspace => { app.input.pop(); }
+            KeyCode::Char(c) => app.input.push(c),
+            KeyCode::Enter => {
+                let text = std::mem::take(&mut app.input);
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    if !sup.procs.iter().any(|p| p.kind == Kind::Node("language") && p.is_up()) {
+                        app.say(Who::System, "language node is not running (Processes tab) — nobody is listening".into());
+                    }
+                    app.say(Who::You, text.clone());
+                    if nc.publish(INPUT_TEXT, text.into()).await.is_err() {
+                        app.say(Who::System, "publish failed: NATS disconnected".into());
+                    }
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+    let was_armed = std::mem::take(&mut app.quit_armed);
+    match k.code {
+        KeyCode::Char('q') => {
+            if was_armed { return true; }
+            app.quit_armed = true;
+        }
+        KeyCode::Char(c @ '1'..='5') => app.tab = Tab::ALL[c as usize - '1' as usize],
+        KeyCode::Char('R') => sup.restart_nodes().await,
+        KeyCode::Char('j') | KeyCode::Down => match app.tab {
+            Tab::Processes => app.selected_proc = (app.selected_proc + 1).min(sup.train_index() - 1),
+            Tab::Train => app.train_sel = (app.train_sel + 1).min(TRAIN_TARGETS.len() - 1),
+            _ => {}
+        },
+        KeyCode::Char('k') | KeyCode::Up => match app.tab {
+            Tab::Processes => app.selected_proc = app.selected_proc.saturating_sub(1),
+            Tab::Train => app.train_sel = app.train_sel.saturating_sub(1),
+            _ => {}
+        },
+        KeyCode::Enter => match app.tab {
+            Tab::Processes => sup.start(app.selected_proc, vec![]).await,
+            Tab::Train => {
+                let i = sup.train_index();
+                sup.start(i, vec![TRAIN_TARGETS[app.train_sel].to_string()]).await;
+            }
+            _ => {}
+        },
+        KeyCode::Char('x') if app.tab == Tab::Processes => sup.stop(app.selected_proc),
+        _ => {}
+    }
+    false
 }

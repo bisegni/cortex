@@ -6,26 +6,29 @@
 //! synthetic: generated shapes are injected into the visual cortex (default).
 //! images:    like synthetic, but from DIR/<label>/*.png|jpg (every 5th image is held out for tests).
 //! camera:    guided; asks you to show real objects (`--words`) to the camera and tests you afterwards.
+//! sequence:  teaches the shapes in `--seq circle,square,cross`, then shows them as a repeating cycle and
+//!            tests whether the brain expects the next one and is surprised by a wrong one.
 use anyhow::{bail, Result};
-use cortex_core::{curriculum, Answer, Frame, TeacherStatus, ANSWER_SUBJECT, INJECT_SUBJECT, INPUT_TEXT, TEACHER_STATUS_SUBJECT};
+use cortex_core::{curriculum, Answer, Frame, Prediction, TeacherStatus, ANSWER_SUBJECT, INJECT_SUBJECT, INPUT_TEXT, PREDICTION_SUBJECT, TEACHER_STATUS_SUBJECT};
 use futures::StreamExt;
 use std::{collections::HashMap, path::{Path, PathBuf}, time::Duration};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode { Synthetic, Camera, Images }
+enum Mode { Synthetic, Camera, Images, Sequence }
 
-struct Args { mode: Mode, images: Option<PathBuf>, words: Vec<String>, headless: bool, episodes: u32, target: f32, speed: f32, test_every: u32, rounds: u32 }
+struct Args { seq: Vec<String>, mode: Mode, images: Option<PathBuf>, words: Vec<String>, headless: bool, episodes: u32, target: f32, speed: f32, test_every: u32, rounds: u32 }
 
 fn parse() -> Result<Args> {
-    let mut a = Args { mode: Mode::Synthetic, images: None, words: vec![], headless: false, episodes: 0, target: 0.8, speed: 1.0, test_every: 12, rounds: 5 };
+    let mut a = Args { seq: vec!["circle".into(), "square".into(), "cross".into()], mode: Mode::Synthetic, images: None, words: vec![], headless: false, episodes: 0, target: 0.8, speed: 1.0, test_every: 12, rounds: 5 };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
         let val = argv.get(i + 1).cloned().unwrap_or_default();
         match argv[i].as_str() {
             "--headless" => a.headless = true,
-            "--mode" => { a.mode = match val.as_str() { "synthetic" => Mode::Synthetic, "camera" => Mode::Camera, "images" => Mode::Images, o => bail!("unknown mode {o}") }; i += 1 }
+            "--mode" => { a.mode = match val.as_str() { "synthetic" => Mode::Synthetic, "camera" => Mode::Camera, "images" => Mode::Images, "sequence" => Mode::Sequence, o => bail!("unknown mode {o}") }; i += 1 }
             "--images" => { a.images = Some(PathBuf::from(&val)); a.mode = Mode::Images; i += 1 }
+            "--seq" => { a.seq = val.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect(); a.mode = Mode::Sequence; i += 1 }
             "--words" => { a.words = val.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect(); i += 1 }
             "--episodes" => { a.episodes = val.parse().unwrap_or(0); i += 1 }
             "--target" => { a.target = val.parse().unwrap_or(0.8); i += 1 }
@@ -83,6 +86,7 @@ enum Source { Synthetic, Folder { train: Vec<Vec<Frame>>, test: Vec<Vec<Frame>> 
 struct Teacher {
     nc: async_nats::Client,
     answers: async_nats::Subscriber,
+    predictions: async_nats::Subscriber,
     status: TeacherStatus,
     classes: Vec<String>,
     source: Source,
@@ -195,6 +199,73 @@ impl Teacher {
         Ok(())
     }
 
+    async fn next_prediction(&mut self, wait: Duration) -> Option<Prediction> {
+        tokio::time::timeout(wait, self.predictions.next()).await.ok().flatten().and_then(|m| serde_json::from_slice::<Prediction>(&m.payload).ok())
+    }
+    async fn drain_predictions(&mut self) { while tokio::time::timeout(Duration::from_millis(20), self.predictions.next()).await.is_ok() {} }
+
+    /// Show one class as a short burst of fresh images, no word.
+    async fn show_burst(&mut self, class: usize) -> Result<()> {
+        for _ in 0..4 {
+            let f = self.image(class, false);
+            self.inject(&f).await?;
+            self.pause(0.2).await;
+        }
+        Ok(())
+    }
+
+    /// Learn the words, watch the cycle repeatedly, then test expectation and surprise.
+    async fn sequence_session(&mut self, seq: &[usize], warmup: u32, cycles: u32, rounds: u32) -> Result<(u32, u32)> {
+        for i in 0..warmup { self.teach(seq[i as usize % seq.len()]).await?; }
+        self.status.phase = "watch".into();
+        for c in 0..cycles {
+            self.status.episode = c + 1;
+            for &class in seq {
+                self.status.class = self.classes[class].clone();
+                self.publish_status().await?;
+                self.show_burst(class).await?;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        let (mut right, mut total) = (0, 0);
+        for _ in 0..rounds {
+            let mut round_right = 0;
+            for i in 0..seq.len() {
+                let (cur, next) = (seq[i], seq[(i + 1) % seq.len()]);
+                self.status.phase = "test".into();
+                self.status.class = self.classes[cur].clone();
+                self.drain_predictions().await;
+                self.show_burst(cur).await?;
+                let p = self.next_prediction(Duration::from_millis(1500)).await.filter(|p| p.got.is_none());
+                let ok = p.as_ref().is_some_and(|p| p.from == self.classes[cur] && p.next == self.classes[next]);
+                self.record(cur, ok, p.as_ref().map_or("(no expectation)", |p| &p.next), p.as_ref().map_or(0.0, |p| p.confidence));
+                round_right += ok as u32;
+                total += 1;
+                self.publish_status().await?;
+            }
+            // Break the pattern: after seq[0] the brain expects seq[1]; show seq[2] instead.
+            if seq.len() >= 3 {
+                self.drain_predictions().await;
+                self.show_burst(seq[0]).await?;
+                self.drain_predictions().await;
+                self.show_burst(seq[2]).await?;
+                let mut surprised = false;
+                while let Some(p) = self.next_prediction(Duration::from_millis(1500)).await {
+                    if p.got.as_deref() == Some(self.classes[seq[2]].as_str()) { surprised = true; break; }
+                }
+                if !surprised { println!("  no surprise when {} followed {}", self.classes[seq[2]], self.classes[seq[0]]); }
+                self.status.novel.1 += 1;
+                self.status.novel.0 += surprised as u32;
+            }
+            right += round_right;
+            let acc = round_right as f32 / seq.len() as f32;
+            self.status.accuracy = Some(acc);
+            self.status.history.push(acc);
+            self.publish_status().await?;
+        }
+        Ok((right, total))
+    }
+
     async fn countdown(&mut self, prompt: String, secs: f32) -> Result<()> {
         let mut left = secs;
         while left > 0.0 {
@@ -266,8 +337,9 @@ async fn main() -> Result<()> {
     let args = parse()?;
     let nc = async_nats::connect(std::env::var("NATS_URL").unwrap_or_else(|_| "127.0.0.1:4222".into())).await?;
     let answers = nc.subscribe(ANSWER_SUBJECT).await?;
+    let predictions = nc.subscribe(PREDICTION_SUBJECT).await?;
     let (classes, source, mode_name) = match args.mode {
-        Mode::Synthetic => (curriculum::CLASSES.iter().map(|c| c.to_string()).collect(), Source::Synthetic, "synthetic"),
+        Mode::Synthetic | Mode::Sequence => (curriculum::CLASSES.iter().map(|c| c.to_string()).collect(), Source::Synthetic, if args.mode == Mode::Sequence { "sequence" } else { "synthetic" }),
         Mode::Camera => (args.words.clone(), Source::Camera, "camera"),
         Mode::Images => {
             let (names, train, test) = load_folder(args.images.as_ref().expect("checked in parse"))?;
@@ -275,11 +347,26 @@ async fn main() -> Result<()> {
         }
     };
     let mut t = Teacher {
-        nc, answers, rng: 0x7EAC4E5, speed: args.speed, test_seed: 0, teach_secs: 5.0 / args.speed,
+        nc, answers, predictions, rng: 0x7EAC4E5, speed: args.speed, test_seed: 0, teach_secs: 5.0 / args.speed,
         status: TeacherStatus { per_class: classes.iter().map(|c| (c.clone(), 0, 0)).collect(), mode: mode_name.into(), ..Default::default() },
         classes, source,
     };
     println!("teacher ({mode_name}): {} classes: {}", t.classes.len(), t.classes.join(", "));
+    if args.mode == Mode::Sequence {
+        let seq: Vec<usize> = args.seq.iter().filter_map(|w| curriculum::CLASSES.iter().position(|c| c == w)).collect();
+        if seq.len() < 2 { bail!("--seq needs at least two of: {}", curriculum::CLASSES.join(", ")); }
+        let cycles = if args.episodes == 0 { 12 } else { args.episodes };
+        let (right, total) = t.sequence_session(&seq, 18, cycles, args.rounds).await?;
+        let acc = right as f32 / total.max(1) as f32;
+        println!("\nnext-item prediction {right}/{total} = {:.0}%  (target {:.0}%)", acc * 100.0, args.target * 100.0);
+        println!("surprise detected when the pattern broke: {}/{}", t.status.novel.0, t.status.novel.1);
+        for (c, r, n) in t.status.per_class.iter().filter(|(_, _, n)| *n > 0) { println!("  after {c:<10} {r}/{n}"); }
+        t.status.phase = "done".into();
+        t.publish_status().await?;
+        t.nc.flush().await?;
+        if acc < args.target { std::process::exit(1); }
+        return Ok(());
+    }
     let camera = args.mode == Mode::Camera;
     let mut episode = 0u32;
     while args.episodes == 0 || episode < args.episodes {

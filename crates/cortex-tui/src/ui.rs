@@ -175,14 +175,15 @@ fn cortex_card(f: &mut Frame, area: Rect, app: &App, name: &str, inp: usize, hid
 
 fn thoughts(f: &mut Frame, area: Rect, app: &App) {
     let h = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = app.thoughts.iter().take(h).map(|s| {
+    let voice = app.said.iter().take(3.min(h)).map(|s| Line::from(vec![Span::styled(format!("{:<10}", s.kind), Style::new().fg(say_color(&s.kind)).bold()), Span::raw(s.text.clone())]));
+    let lines: Vec<Line> = voice.chain(app.thoughts.iter().map(|s| {
         Line::from(vec![
             Span::styled(format!("{:<9}", s.symbol), Style::new().fg(Color::LightRed).bold()),
             Span::styled(format!(" {:.2} ", s.activation), Style::new().fg(DIM)),
             Span::raw(s.context.clone().unwrap_or_default()),
         ])
-    }).collect();
-    f.render_widget(Paragraph::new(lines).block(panel(title("workspace · what the brain is attending to"))), area);
+    })).take(h).collect();
+    f.render_widget(Paragraph::new(lines).block(panel(title("inner voice · workspace"))), area);
 }
 
 // ───────────────────────────── Chat ─────────────────────────────
@@ -235,6 +236,7 @@ fn chat(f: &mut Frame, area: Rect, app: &App) {
         Line::from(neuron_strip(lang.map_or(&[][..], |s| &s.embedding))),
         Line::from(Span::styled(format!("symbol {}", lang.map_or("—", |s| s.symbol.as_str())), Style::new().fg(DIM))),
         answer_line(app),
+        expecting_line(app),
         Line::from(""),
         Line::from(Span::styled("last associations", Style::new().fg(Color::LightYellow).bold())),
     ];
@@ -302,20 +304,35 @@ fn camera(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
         Line::from(Span::styled(format!("symbol {}", v.map_or("—", |s| s.symbol.as_str())), Style::new().fg(DIM))),
         Line::from(""),
         answer_line(app),
+        expecting_line(app),
         Line::from(Span::styled(format!("{}", v.and_then(|s| app.signals.iter().find(|x| x.source == "visual").and_then(|x| x.context.clone()).filter(|_| s.count > 0)).unwrap_or_default()), Style::new().fg(DIM))),
     ];
     f.render_widget(Paragraph::new(side).block(panel(title("signal"))), cols[1]);
 }
 
-/// "I see: circle (82%)" for the most recent answer, fading out after a few seconds.
+/// "I see: circle (82%)" from the live percept, fading out after a few seconds.
 fn answer_line(app: &App) -> Line<'static> {
-    match &app.last_answer {
-        Some((w, c, t)) if t.elapsed().as_secs() < 8 => Line::from(vec![
-            Span::styled("I see: ", Style::new().fg(DIM)),
-            Span::styled(w.clone(), Style::new().fg(Color::LightGreen).bold()),
-            Span::styled(format!(" ({:.0}%)", c * 100.0), Style::new().fg(DIM)),
-        ]),
+    match &app.percept {
+        Some((w, c, t)) if t.elapsed().as_secs() < 4 => {
+            let (label, color) = if w == "unknown" { ("something new".to_string(), Color::LightYellow) } else { (w.clone(), Color::LightGreen) };
+            Line::from(vec![
+                Span::styled("I see: ", Style::new().fg(DIM)),
+                Span::styled(label, Style::new().fg(color).bold()),
+                Span::styled(format!(" ({:.0}%)", c * 100.0), Style::new().fg(DIM)),
+            ])
+        }
         _ => Line::from(Span::styled("I see: —", Style::new().fg(DIM))),
+    }
+}
+
+fn expecting_line(app: &App) -> Line<'static> {
+    match &app.expecting {
+        Some((from, next, c, t)) if t.elapsed().as_secs() < 20 => Line::from(vec![
+            Span::styled("expecting: ", Style::new().fg(DIM)),
+            Span::styled(next.clone(), Style::new().fg(Color::LightBlue).bold()),
+            Span::styled(format!(" after {from} ({:.0}%)", c * 100.0), Style::new().fg(DIM)),
+        ]),
+        _ => Line::from(Span::styled("expecting: —", Style::new().fg(DIM))),
     }
 }
 

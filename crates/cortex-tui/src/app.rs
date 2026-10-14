@@ -1,5 +1,5 @@
 //! Pure dashboard state, fed by NATS signals and camera frames.
-use cortex_core::{Answer, Frame, Say, Signal, TeacherStatus};
+use cortex_core::{Answer, Frame, Percept, Prediction, Say, Signal, TeacherStatus};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 
 /// (name, input, hidden, output) of every cortex; matches the geometry in cortex-node.
@@ -60,19 +60,21 @@ pub struct App {
     pub last_answer: Option<(String, f32, Instant)>,
     pub teach_speed: u32,
     pub said: VecDeque<Say>,
+    pub percept: Option<(String, f32, Instant)>,
+    /// (from, expected next, confidence, when) — cleared by a surprise.
+    pub expecting: Option<(String, String, f32, Instant)>,
     /// Teach tab: false = generated shapes, true = guided camera objects.
     pub teach_camera: bool,
     pub teach_words: String,
-    last_chat: HashMap<String, (String, Instant)>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
             tab: Tab::Brain, edges: HashMap::new(), cortex: HashMap::new(), signals: VecDeque::new(), thoughts: VecDeque::new(),
-            chat: vec![ChatLine { who: Who::System, text: "Type a sentence and press Enter. The language cortex hears it; replies are what the brain broadcasts, recalls or associates.".into() }],
+            chat: vec![ChatLine { who: Who::System, text: "Show the camera something and say what it is ('this is a cup'). Ask 'what is this?', 'what did you see?' or 'what comes next?'. Answer yes/no when it asks.".into() }],
             input: String::new(), frame: None, frame_times: VecDeque::new(), last_frame: None, msg_times: VecDeque::new(),
-            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, said: VecDeque::new(), teach_camera: false, teach_words: std::env::var("CORTEX_WORDS").unwrap_or_else(|_| "hand,cup".into()), last_chat: HashMap::new(),
+            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, said: VecDeque::new(), percept: None, expecting: None, teach_camera: false, teach_words: std::env::var("CORTEX_WORDS").unwrap_or_else(|_| "hand,cup".into()),
         }
     }
 
@@ -91,35 +93,12 @@ impl App {
         if s.kind == "broadcast" {
             push_cap(&mut self.thoughts, s.clone(), 60);
         }
-        if matches!(s.kind.as_str(), "broadcast" | "recall" | "association") {
-            self.maybe_reply(&s, now);
-        }
         push_cap(&mut self.signals, s, 300);
     }
 
-    /// Surface brain output in the chat transcript without flooding it.
-    fn maybe_reply(&mut self, s: &Signal, now: Instant) {
-        let prev = self.last_chat.get(&s.source);
-        let stale = prev.map_or(true, |(sym, t)| (sym != &s.symbol && now.duration_since(*t) > Duration::from_millis(800)) || now.duration_since(*t) > Duration::from_secs(8));
-        if !stale {
-            return;
-        }
-        self.last_chat.insert(s.source.clone(), (s.symbol.clone(), now));
-        let ctx = s.context.as_deref().unwrap_or("");
-        self.chat.push(ChatLine { who: Who::Brain(s.source.clone()), text: format!("{} [{}]  {}", s.symbol, s.kind, ctx) });
-        if self.chat.len() > 500 {
-            self.chat.remove(0);
-        }
-    }
-
-    /// The brain's answer to "what do you see?". Shown in chat unless the teacher is running its own tests.
+    /// Spontaneous recognition; chat only shows what the brain chooses to say (`on_say`).
     pub fn on_answer(&mut self, a: Answer) {
         let now = Instant::now();
-        let teaching = self.teacher_seen.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
-        if !teaching {
-            let text = if a.word == "unknown" { "I don't recognise this.".to_string() } else { format!("I see: {}  ({:.0}% sure)", a.word, a.confidence * 100.0) };
-            self.chat.push(ChatLine { who: Who::Brain("answer".into()), text });
-        }
         self.last_answer = Some((a.word, a.confidence, now));
     }
 
@@ -128,6 +107,12 @@ impl App {
         self.chat.push(ChatLine { who: Who::Brain(s.kind.clone()), text: s.text.clone() });
         if self.chat.len() > 500 { self.chat.remove(0); }
         push_cap(&mut self.said, s, 20);
+    }
+
+    pub fn on_percept(&mut self, p: Percept) { self.percept = Some((p.word, p.confidence, Instant::now())); }
+
+    pub fn on_prediction(&mut self, p: Prediction) {
+        self.expecting = if p.got.is_some() { None } else { Some((p.from, p.next, p.confidence, Instant::now())) };
     }
 
     pub fn on_teacher(&mut self, t: TeacherStatus) {
@@ -185,36 +170,34 @@ mod tests {
     }
 
     #[test]
-    fn chat_reply_is_throttled_per_source_symbol() {
+    fn signals_and_answers_stay_out_of_the_chat() {
         let mut a = App::new();
         let base = a.chat.len();
         a.on_signal(sig("workspace", "memory", "broadcast", "P1"));
-        a.on_signal(sig("workspace", "memory", "broadcast", "P1"));
-        a.on_signal(sig("workspace", "memory", "broadcast", "P2"));
-        assert_eq!(a.chat.len(), base + 1);
-        a.on_signal(sig("visual", "perceptual", "representation", "V1"));
-        assert_eq!(a.chat.len(), base + 1);
-    }
-
-    #[test]
-    fn answer_goes_to_chat_unless_teacher_runs() {
-        let mut a = App::new();
-        let base = a.chat.len();
-        a.on_answer(Answer { word: "circle".into(), confidence: 0.8 });
-        assert_eq!(a.chat.len(), base + 1);
-        a.on_teacher(TeacherStatus::default());
         a.on_answer(Answer { word: "square".into(), confidence: 0.5 });
-        assert_eq!(a.chat.len(), base + 1);
+        assert_eq!(a.chat.len(), base);
         assert_eq!(a.last_answer.as_ref().map(|x| x.0.as_str()), Some("square"));
+        assert_eq!(a.thoughts.len(), 1);
     }
 
     #[test]
     fn say_lands_in_chat_and_inner_voice() {
         let mut a = App::new();
         let base = a.chat.len();
-        a.on_say(Say { text: "What is this?".into(), kind: "question".into() });
+        a.on_say(Say::new("What is this?", "question"));
         assert_eq!(a.chat.len(), base + 1);
         assert_eq!(a.said.front().map(|s| s.kind.as_str()), Some("question"));
+    }
+
+    #[test]
+    fn percept_and_expectation_track_latest() {
+        let mut a = App::new();
+        a.on_percept(Percept { word: "cup".into(), confidence: 0.9, since_ms: 10 });
+        assert_eq!(a.percept.as_ref().map(|p| p.0.as_str()), Some("cup"));
+        a.on_prediction(Prediction { from: "a".into(), next: "b".into(), confidence: 0.8, got: None });
+        assert!(a.expecting.is_some());
+        a.on_prediction(Prediction { from: "a".into(), next: "b".into(), confidence: 0.8, got: Some("c".into()) });
+        assert!(a.expecting.is_none());
     }
 
     #[test]

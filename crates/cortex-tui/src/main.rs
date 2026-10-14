@@ -4,7 +4,7 @@ mod ui;
 
 use anyhow::{Context, Result};
 use app::{App, Tab, Who, TRAIN_TARGETS};
-use cortex_core::{Answer, Frame, Say, Signal, TeacherStatus, ANSWER_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, SAY_SUBJECT, TEACHER_STATUS_SUBJECT};
+use cortex_core::{Answer, Frame, Percept, Prediction, Say, Signal, TeacherStatus, ANSWER_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, PERCEPT_SUBJECT, PREDICTION_SUBJECT, SAY_SUBJECT, TEACHER_STATUS_SUBJECT};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use std::time::Duration;
@@ -30,10 +30,12 @@ async fn main() -> Result<()> {
     let mut answers = nc.subscribe(ANSWER_SUBJECT).await?;
     let mut teacher = nc.subscribe(TEACHER_STATUS_SUBJECT).await?;
     let mut says = nc.subscribe(SAY_SUBJECT).await?;
+    let mut percepts = nc.subscribe(PERCEPT_SUBJECT).await?;
+    let mut predictions = nc.subscribe(PREDICTION_SUBJECT).await?;
 
     // ratatui::init installs a panic hook that restores the terminal.
     let mut term = ratatui::init();
-    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher, says: &mut says }).await;
+    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher, says: &mut says, percepts: &mut percepts, predictions: &mut predictions }).await;
     ratatui::restore();
     sup.shutdown().await;
     result
@@ -45,10 +47,12 @@ struct Feeds<'a> {
     answers: &'a mut async_nats::Subscriber,
     teacher: &'a mut async_nats::Subscriber,
     says: &'a mut async_nats::Subscriber,
+    percepts: &'a mut async_nats::Subscriber,
+    predictions: &'a mut async_nats::Subscriber,
 }
 
 async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &async_nats::Client, feeds: Feeds<'_>) -> Result<()> {
-    let Feeds { signals: sub, frames, answers, teacher, says } = feeds;
+    let Feeds { signals: sub, frames, answers, teacher, says, percepts, predictions } = feeds;
     let mut app = App::new();
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -73,6 +77,14 @@ async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &asy
             msg = answers.next() => {
                 let Some(msg) = msg else { break };
                 if let Ok(a) = serde_json::from_slice::<Answer>(&msg.payload) { app.on_answer(a); }
+            }
+            msg = percepts.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(p) = serde_json::from_slice::<Percept>(&msg.payload) { app.on_percept(p); }
+            }
+            msg = predictions.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(p) = serde_json::from_slice::<Prediction>(&msg.payload) { app.on_prediction(p); }
             }
             msg = says.next() => {
                 let Some(msg) = msg else { break };

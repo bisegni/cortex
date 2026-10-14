@@ -55,7 +55,34 @@ pub const SAY_SUBJECT: &str = "cortex.say";
 
 /// An utterance. `kind`: answer, question, notice, memory, prediction, info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Say { pub text: String, pub kind: String }
+pub struct Say {
+    pub text: String, pub kind: String,
+    /// The word a question is about ("Is this a cup?" -> "cup"), so a following yes/no can be applied.
+    #[serde(default)] pub word: Option<String>,
+}
+impl Say {
+    pub fn new(text: impl Into<String>, kind: &str) -> Self { Self { text: text.into(), kind: kind.into(), word: None } }
+    pub fn about(mut self, word: &str) -> Self { self.word = Some(word.into()); self }
+}
+
+/// Continuous recognition result from the associative cortex ("unknown" for novel images).
+pub const PERCEPT_SUBJECT: &str = "cortex.percept";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Percept { pub word: String, pub confidence: f32, /// How long this word has been the stable percept.
+    pub since_ms: u64 }
+
+/// Sequence expectation or a broken expectation ("surprise").
+pub const PREDICTION_SUBJECT: &str = "cortex.prediction";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prediction {
+    /// The word this prediction follows from.
+    pub from: String,
+    /// What is expected next.
+    pub next: String,
+    pub confidence: f32,
+    /// Set when the expectation was broken: what actually appeared.
+    pub got: Option<String>,
+}
 
 /// What the brain says it sees, published by the language cortex.
 #[derive(Debug, Clone, Serialize, Deserialize)]

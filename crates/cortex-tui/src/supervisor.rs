@@ -87,6 +87,8 @@ impl Supervisor {
         Self { procs, tx, rx, bin_dir, root, nats_addr }
     }
 
+    pub fn root(&self) -> &std::path::Path { &self.root }
+
     pub fn train_index(&self) -> usize {
         self.procs.len() - 2
     }

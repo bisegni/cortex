@@ -52,6 +52,24 @@ pub const TEACHER_STATUS_SUBJECT: &str = "cortex.teacher.status";
 pub const INTENT_SUBJECT: &str = "cortex.intent";
 /// Anything the brain says out loud (replies and initiative).
 pub const SAY_SUBJECT: &str = "cortex.say";
+pub const METRICS_SUBJECT: &str = "cortex.metrics";
+pub const BRAIN_STATE_SUBJECT: &str = "cortex.brain.state";
+
+/// Running training loss of one cortex, published every couple of seconds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Metrics { pub node: String, pub loss: f32, pub steps: u64 }
+
+/// What the associative cortex currently knows, for the dashboard's Learn tab.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrainState {
+    pub prototypes: usize,
+    /// (word, prototypes carrying it, total weight)
+    pub words: Vec<(String, u32, f32)>,
+    /// (from, to, count) strongest word-to-word transitions
+    pub transitions: Vec<(String, String, f32)>,
+    /// Distance beyond which an image counts as new, once calibrated.
+    pub novelty_threshold: Option<f32>,
+}
 
 /// An utterance. `kind`: answer, question, notice, memory, prediction, info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +125,8 @@ pub struct TeacherStatus {
     pub countdown: f32,
     /// Teaching mode: synthetic, camera, images.
     pub mode: String,
+    /// confusion[true class][answered class]; the last column counts "unknown"/no answer.
+    pub confusion: Vec<Vec<u32>>,
 }
 
 /// Downsampled grayscale camera frame published by the visual cortex for observers.

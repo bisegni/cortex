@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use cortex_core::{cosine, curriculum, incoming_subject, intent::{self, Intent}, outgoing, subject, Answer, Frame, Percept, Prediction, Say, Signal, ANSWER_SUBJECT, FRAME_SUBJECT, INJECT_SUBJECT, INPUT_TEXT, INTENT_SUBJECT, PERCEPT_SUBJECT, PREDICTION_SUBJECT, SAY_SUBJECT};
+use cortex_core::{cosine, curriculum, incoming_subject, intent::{self, Intent}, outgoing, subject, Answer, Frame, Percept, Prediction, Say, Signal, ANSWER_SUBJECT, BRAIN_STATE_SUBJECT, BrainState, FRAME_SUBJECT, INJECT_SUBJECT, INPUT_TEXT, INTENT_SUBJECT, Metrics, METRICS_SUBJECT, PERCEPT_SUBJECT, PREDICTION_SUBJECT, SAY_SUBJECT};
 use sequence::{SeqEvent, Sequence};
 use futures::StreamExt;
 use nokhwa::{Camera, utils::{CameraIndex, RequestedFormat, RequestedFormatType}};
@@ -9,7 +9,7 @@ use tokio::io::{self, AsyncBufReadExt};
 mod drive;
 mod neural;
 mod sequence;
-use neural::{autosave, fit, sensory_vector, NeuralNet, Prototypes};
+use neural::{autosave, fit, sensory_vector, Meter, NeuralNet, Prototypes};
 
 #[tokio::main]
 async fn main()->Result<()>{
@@ -31,17 +31,17 @@ async fn language(nc:async_nats::Client)->Result<()>{
     let mut sub=nc.subscribe(incoming_subject("language")).await?;
     let mut text_in=nc.subscribe(INPUT_TEXT).await?;
     let mut lines=io::BufReader::new(io::stdin()).lines();let mut stdin_open=true;
-    let mut net=NeuralNet::load_or_new("weights/cortex-0/language.bin",32,24,16,0x1A6E,0.015);let mut last_save=Instant::now();
+    let mut net=NeuralNet::load_or_new("weights/cortex-0/language.bin",32,24,16,0x1A6E,0.015);let mut last_save=Instant::now();let mut meter=Meter::new();
     println!("Language cortex: text via stdin or {INPUT_TEXT}; answers are published on {ANSWER_SUBJECT}.");
     loop{
         tokio::select!{
             line=lines.next_line(),if stdin_open=>{match line?{Some(line)=>hear(&nc,&mut net,&line).await?,None=>stdin_open=false}},
             msg=text_in.next()=>{if let Some(msg)=msg{hear(&nc,&mut net,&String::from_utf8_lossy(&msg.payload)).await?;}},
-            msg=sub.next()=>{if let Some(msg)=msg{let s:Signal=serde_json::from_slice(&msg.payload)?;let x=fit(&s.embedding,32);net.train_modulated(&x,&fit(&x,16),s.connection_weight);
+            msg=sub.next()=>{if let Some(msg)=msg{let s:Signal=serde_json::from_slice(&msg.payload)?;let x=fit(&s.embedding,32);meter.add(net.train_modulated(&x,&fit(&x,16),s.connection_weight));
                 if s.kind=="recall"{let word=s.symbol.trim_start_matches("W:").to_string();println!("answer: {word} ({:.2})",s.activation);
                     nc.publish(ANSWER_SUBJECT,serde_json::to_vec(&Answer{word,confidence:s.activation})?.into()).await?;}}}
         }
-        autosave(&net,"weights/cortex-0/language.bin",&mut last_save);
+        autosave(&net,"weights/cortex-0/language.bin",&mut last_save);report(&nc,"language",&mut meter).await?;
     }
 }
 async fn hear(nc:&async_nats::Client,net:&mut NeuralNet,line:&str)->Result<()>{
@@ -57,6 +57,7 @@ async fn hear(nc:&async_nats::Client,net:&mut NeuralNet,line:&str)->Result<()>{
 }
 async fn say(nc:&async_nats::Client,text:impl Into<String>,kind:&str)->Result<()>{speak(nc,&Say::new(text,kind)).await}
 async fn speak(nc:&async_nats::Client,s:&Say)->Result<()>{nc.publish(SAY_SUBJECT,serde_json::to_vec(s)?.into()).await?;Ok(())}
+async fn report(nc:&async_nats::Client,node:&str,meter:&mut Meter)->Result<()>{if let Some((loss,steps))=meter.due(){publish_json(nc,METRICS_SUBJECT,&Metrics{node:node.into(),loss,steps}).await?;}Ok(())}
 async fn publish_json<T:Serialize>(nc:&async_nats::Client,subject:&str,v:&T)->Result<()>{nc.publish(subject.to_string(),serde_json::to_vec(v)?.into()).await?;Ok(())}
 async fn visual(nc:async_nats::Client)->Result<()>{
     let index=std::env::var("CORTEX_CAMERA").ok().and_then(|v|v.parse::<u32>().ok()).unwrap_or(0);
@@ -64,12 +65,12 @@ async fn visual(nc:async_nats::Client)->Result<()>{
     if std::env::var("CORTEX_CAMERA").as_deref()!=Ok("off"){std::thread::spawn(move||camera_loop(index,tx));}
     let mut inject=nc.subscribe(INJECT_SUBJECT).await?;
     let mut net=NeuralNet::load_or_new("weights/cortex-0/visual.bin",128,64,16,0x715A1,0.006);
-    let mut protos=Prototypes::default();let mut last_inject:Option<Instant>=None;let mut cam_open=true;let mut last_save=Instant::now();
+    let mut meter=Meter::new();let mut protos=Prototypes::default();let mut last_inject:Option<Instant>=None;let mut cam_open=true;let mut last_save=Instant::now();
     loop{
         tokio::select!{
-            msg=inject.next()=>{let Some(msg)=msg else{break};if let Ok(frame)=serde_json::from_slice::<Frame>(&msg.payload){last_inject=Some(Instant::now());see(&nc,&mut net,&mut protos,frame,"inject").await?;}},
+            msg=inject.next()=>{let Some(msg)=msg else{break};if let Ok(frame)=serde_json::from_slice::<Frame>(&msg.payload){last_inject=Some(Instant::now());see(&nc,&mut net,&mut protos,&mut meter,frame,"inject").await?;}},
             frame=rx.recv(),if cam_open=>match frame{
-                Some(frame)=>if !last_inject.is_some_and(|t|t.elapsed()<Duration::from_secs(3)){see(&nc,&mut net,&mut protos,frame,&format!("camera:{index}")).await?;},
+                Some(frame)=>if !last_inject.is_some_and(|t|t.elapsed()<Duration::from_secs(3)){see(&nc,&mut net,&mut protos,&mut meter,frame,&format!("camera:{index}")).await?;},
                 None=>{cam_open=false;eprintln!("camera unavailable; visual cortex now follows injected frames only");}
             }
         }
@@ -77,9 +78,9 @@ async fn visual(nc:async_nats::Client)->Result<()>{
     }
     Ok(())
 }
-async fn see(nc:&async_nats::Client,net:&mut NeuralNet,protos:&mut Prototypes,frame:Frame,source:&str)->Result<()>{
+async fn see(nc:&async_nats::Client,net:&mut NeuralNet,protos:&mut Prototypes,meter:&mut Meter,frame:Frame,source:&str)->Result<()>{
     nc.publish(FRAME_SUBJECT,serde_json::to_vec(&frame)?.into()).await?;
-    let x=curriculum::retina(&frame);net.train_modulated(&x,&curriculum::latent_target(&x),0.3);
+    let x=curriculum::retina(&frame);meter.add(net.train_modulated(&x,&curriculum::latent_target(&x),0.3));report(nc,"visual",meter).await?;
     let(_,emb)=net.forward(&x);let id=format!("V{}",protos.assign(&emb));
     emit(nc,"visual","representation",id,1.0,emb,Some(format!("{source} {}x{}",frame.width,frame.height)),3).await
 }
@@ -102,15 +103,15 @@ fn to_gray(rgb:&[u8],w:usize,h:usize)->Option<Frame>{
 }
 async fn perceptual(nc:async_nats::Client)->Result<()>{
     let mut sub=nc.subscribe(incoming_subject("perceptual")).await?;let mut prototypes:Vec<(String,Vec<f32>,u32)>=vec![];
-    let mut net=NeuralNet::load_or_new("weights/cortex-0/perceptual.bin",16,24,16,0x9E2C,0.008);let mut prediction:Option<Vec<f32>>=None;let mut last_save=Instant::now();
+    let mut net=NeuralNet::load_or_new("weights/cortex-0/perceptual.bin",16,24,16,0x9E2C,0.008);let mut prediction:Option<Vec<f32>>=None;let mut last_save=Instant::now();let mut meter=Meter::new();
     while let Some(msg)=sub.next().await{let s:Signal=serde_json::from_slice(&msg.payload)?;
         if s.source=="associative"{prediction=Some(fit(&s.embedding,16));continue} if s.source=="workspace"{continue}
         let actual=fit(&s.embedding,16);let surprise=prediction.as_ref().map(|p|(1.0-cosine(p,&actual)).clamp(0.0,2.0)).unwrap_or(0.0);
-        net.train_modulated(&actual,&actual,(s.connection_weight*(0.5+surprise)).clamp(0.1,2.0));let(_,latent)=net.forward(&actual);
+        meter.add(net.train_modulated(&actual,&actual,(s.connection_weight*(0.5+surprise)).clamp(0.1,2.0)));let(_,latent)=net.forward(&actual);
         let best=prototypes.iter().enumerate().map(|(i,(_,e,_))|(i,cosine(e,&latent))).max_by(|a,b|a.1.total_cmp(&b.1));
         let(symbol,idx)=match best{Some((i,score))if score>0.86=>(prototypes[i].0.clone(),Some(i)),_=>(format!("P{}",prototypes.len()+1),None)};
         if let Some(i)=idx{let(_,e,count)=&mut prototypes[i];let c=*count as f32;for(x,y)in e.iter_mut().zip(&latent){*x=(*x*c+*y)/(c+1.0)}*count+=1}else{prototypes.push((symbol.clone(),latent.clone(),1))}
-        if s.ttl>0{emit(&nc,"perceptual","representation",symbol,1.0,latent,Some(format!("from {}",s.source)),s.ttl-1).await?;}prediction=None;autosave(&net,"weights/cortex-0/perceptual.bin",&mut last_save);
+        if s.ttl>0{emit(&nc,"perceptual","representation",symbol,1.0,latent,Some(format!("from {}",s.source)),s.ttl-1).await?;}prediction=None;autosave(&net,"weights/cortex-0/perceptual.bin",&mut last_save);report(&nc,"perceptual",&mut meter).await?;
     }Ok(())
 }
 /// A recognised thing the brain has seen, with the wall-clock time.
@@ -128,7 +129,7 @@ fn recount(eps:&[Episode],now:u64)->String{
 }
 async fn memory(nc:async_nats::Client)->Result<()>{
     let mut sub=nc.subscribe(incoming_subject("memory")).await?;let mut intents=nc.subscribe(INTENT_SUBJECT).await?;let mut text_in=nc.subscribe(INPUT_TEXT).await?;
-    let mut recent:Vec<Signal>=vec![];let mut net=NeuralNet::load_or_new("weights/cortex-0/memory.bin",16,32,16,0x4D454D,0.006);let mut last_save=Instant::now();
+    let mut recent:Vec<Signal>=vec![];let mut net=NeuralNet::load_or_new("weights/cortex-0/memory.bin",16,32,16,0x4D454D,0.006);let mut last_save=Instant::now();let mut meter=Meter::new();
     let mut episodes:Vec<Episode>=std::fs::read(EPISODES_PATH).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or_default();let mut eps_dirty=false;
     let idle=Duration::from_secs(std::env::var("CORTEX_IDLE_SECS").ok().and_then(|v|v.parse().ok()).unwrap_or(90));
     let proactive=std::env::var("CORTEX_PROACTIVE").as_deref()!=Ok("off");
@@ -140,10 +141,10 @@ async fn memory(nc:async_nats::Client)->Result<()>{
                     let word=s.symbol.trim_start_matches("W:").to_string();
                     if episodes.last().map_or(true,|e|e.word!=word||now_ms().saturating_sub(e.at_ms)>10_000){episodes.push(Episode{at_ms:now_ms(),word});if episodes.len()>200{episodes.remove(0);}eps_dirty=true;}
                 }
-                let x=fit(&s.embedding,16);net.train_modulated(&x,&x,s.connection_weight);let(_,mem)=net.forward(&x);
+                let x=fit(&s.embedding,16);meter.add(net.train_modulated(&x,&x,s.connection_weight));let(_,mem)=net.forward(&x);
                 let related=recent.iter().rev().find(|r|cosine(&r.embedding,&mem)>0.90).cloned();let mut stored=s.clone();stored.embedding=mem.clone();recent.push(stored);if recent.len()>64{recent.remove(0);}
                 if let(Some(r),true)=(related,s.ttl>0){emit(&nc,"memory","recall",format!("M:{}",r.symbol),0.65,mem,Some(format!("recalled by {}",s.symbol)),s.ttl-1).await?;}
-                autosave(&net,"weights/cortex-0/memory.bin",&mut last_save);
+                autosave(&net,"weights/cortex-0/memory.bin",&mut last_save);report(&nc,"memory",&mut meter).await?;
                 if eps_dirty{let _=std::fs::write(EPISODES_PATH,serde_json::to_vec(&episodes)?);eps_dirty=false;}
             },
             msg=intents.next()=>{let Some(msg)=msg else{break};last_user=Instant::now();
@@ -207,6 +208,13 @@ fn teach(l:&mut Learned,emb:&[f32],word:&str)->usize{
     if protos.len()>MAX_PROTOS{let weakest=protos.iter().enumerate().min_by(|a,b|a.1.words.values().sum::<f32>().total_cmp(&b.1.words.values().sum::<f32>())).map(|(i,_)|i).unwrap_or(0);protos.remove(weakest);return idx.min(protos.len().saturating_sub(1))}
     idx
 }
+fn brain_state(l:&Learned)->BrainState{
+    let mut words:HashMap<&str,(u32,f32)>=HashMap::new();
+    for p in &l.protos{for(w,c)in &p.words{let e=words.entry(w).or_default();e.0+=1;e.1+=c;}}
+    let mut words:Vec<(String,u32,f32)>=words.into_iter().map(|(w,(n,c))|(w.to_string(),n,c)).collect();
+    words.sort_by(|a,b|b.2.total_cmp(&a.2));
+    BrainState{prototypes:l.protos.len(),words,transitions:l.seq.top(8),novelty_threshold:l.novelty_threshold()}
+}
 fn forget(l:&mut Learned,word:&str)->bool{
     let had=l.protos.iter().any(|p|p.words.contains_key(word));
     for p in &mut l.protos{p.words.remove(word);}
@@ -241,6 +249,7 @@ async fn associative(nc:async_nats::Client)->Result<()>{
     let mut last_word:Option<(String,Vec<f32>,Instant)>=None;let mut last_image:Option<(Vec<f32>,Instant,bool)>=None;
     let mut last_recall:Option<(String,Instant)>=None;let mut dirty=false;let mut last_save=Instant::now();
     // Percept bookkeeping and the last yes/no question we asked (word, image latent, when).
+    let mut state_tick=tokio::time::interval(Duration::from_secs(1));
     let mut percept:(String,Instant,Instant)=(String::new(),Instant::now(),Instant::now());let mut asked:Option<(String,Vec<f32>,Instant)>=None;
     loop{
         tokio::select!{
@@ -262,6 +271,7 @@ async fn associative(nc:async_nats::Client)->Result<()>{
                     Ok(Intent::No)=>if let Some((w,emb,t))=asked.take().filter(|(_,_,t)|t.elapsed()<Duration::from_secs(30)){let _=t;penalize(&mut learned,&emb,&w);dirty=true;say(&nc,format!("Not {w} then. What is it?"),"question").await?;},
                     _=>{}
                 }},
+            _=state_tick.tick()=>{publish_json(&nc,BRAIN_STATE_SUBJECT,&brain_state(&learned)).await?;},
             msg=says.next()=>{let Some(msg)=msg else{break};
                 // Remember which word a yes/no question was about, together with the image it referred to.
                 if let(Ok(s),Some((emb,t,_)))=(serde_json::from_slice::<Say>(&msg.payload),&last_image){if s.kind=="question"&&t.elapsed()<Duration::from_secs(5){if let Some(w)=s.word{asked=Some((w,emb.clone(),Instant::now()));}}}

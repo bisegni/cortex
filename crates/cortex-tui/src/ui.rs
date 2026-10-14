@@ -44,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &App, sup: &Supervisor) {
         Tab::Chat => chat(f, rows[1], app),
         Tab::Camera => camera(f, rows[1], app, sup),
         Tab::Teach => teach(f, rows[1], app, sup),
+        Tab::Learn => learn(f, rows[1], app),
         Tab::Processes => processes(f, rows[1], app, sup),
         Tab::Train => train(f, rows[1], app, sup),
     }
@@ -69,9 +70,10 @@ fn header(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = match app.tab {
-        Tab::Brain => "1-6/Tab switch  R restart nodes  q quit",
-        Tab::Chat => "type + Enter to speak to the brain   F1-F6/Tab switch   Esc brain   Ctrl-C quit",
-        Tab::Camera => "1-6/Tab switch  R restart nodes  q quit",
+        Tab::Brain => "1-7/Tab switch  R restart nodes  q quit",
+        Tab::Chat => "type + Enter to speak to the brain   F1-F7/Tab switch   Esc brain   Ctrl-C quit",
+        Tab::Camera => "1-7/Tab switch  R restart nodes  q quit",
+        Tab::Learn => "j/k select word  d forget  e export snapshot  i import latest  q quit",
         Tab::Teach => "t start/stop teacher  g synthetic/camera mode  s speed  R restart nodes  q quit",
         Tab::Processes => "j/k select  Enter (re)start  x stop  R restart nodes  q quit",
         Tab::Train => "j/k choose  Enter train  R restart nodes (load new weights)  q quit",
@@ -397,6 +399,75 @@ fn teach(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
     }
     if lines.is_empty() { lines.push(Line::from(Span::styled(" waiting for the first test round…", Style::new().fg(DIM)))); }
     f.render_widget(Paragraph::new(lines).block(panel(title("per class (all tests)"))), right[2]);
+}
+
+// ───────────────────────────── Learn ─────────────────────────────
+
+fn learn(f: &mut Frame, area: Rect, app: &App) {
+    let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Min(40)]).split(area);
+    let left = Layout::vertical([Constraint::Min(8), Constraint::Length(12), Constraint::Length(3)]).split(cols[0]);
+    let right = Layout::vertical([Constraint::Length(14), Constraint::Min(8)]).split(cols[1]);
+    let brain = app.brain.clone().unwrap_or_default();
+
+    let items: Vec<ListItem> = brain.words.iter().map(|(w, n, c)| {
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("{w:<14}"), Style::new().fg(Color::White).bold()),
+            Span::styled(format!("{n:>4} protos"), Style::new().fg(Color::Gray)),
+            Span::styled(format!("  weight {c:>6.0}"), Style::new().fg(DIM)),
+        ]))
+    }).collect();
+    let thr = brain.novelty_threshold.map_or("calibrating".to_string(), |t| format!("{t:.2}"));
+    let mut state = ListState::default().with_selected((!brain.words.is_empty()).then_some(app.learn_sel));
+    f.render_stateful_widget(
+        List::new(items).block(panel(title(&format!("what it knows · {} prototypes · novelty > {thr}", brain.prototypes)))).highlight_style(Style::new().bg(Color::Rgb(40, 44, 60)).bold()).highlight_symbol("▸ "),
+        left[0], &mut state,
+    );
+
+    let mut lines: Vec<Line> = brain.transitions.iter().map(|(a, b, c)| Line::from(vec![
+        Span::styled(format!(" {a:<12}"), Style::new().fg(Color::LightBlue)), Span::raw(" → "), Span::styled(format!("{b:<12}"), Style::new().fg(Color::LightBlue)), Span::styled(format!(" ×{c:.0}"), Style::new().fg(DIM)),
+    ])).collect();
+    if lines.is_empty() { lines.push(Line::from(Span::styled(" no sequences seen yet (teacher --mode sequence)", Style::new().fg(DIM)))); }
+    f.render_widget(Paragraph::new(lines).block(panel(title("sequences"))), left[1]);
+
+    let note = if app.learn_note.is_empty() { "d forget · e export · i import".to_string() } else { app.learn_note.clone() };
+    f.render_widget(Paragraph::new(Span::styled(format!(" {note}"), Style::new().fg(Color::LightYellow))).block(panel(title("brain state"))), left[2]);
+
+    // Training loss per node.
+    let nodes = ["visual", "perceptual", "memory", "language"];
+    let rows = Layout::vertical(nodes.map(|_| Constraint::Length(3))).split(right[0].inner(ratatui::layout::Margin { horizontal: 0, vertical: 1 }));
+    f.render_widget(panel(title("training loss (lower = better)")), right[0]);
+    for (i, node) in nodes.iter().enumerate() {
+        let data: Vec<u64> = app.losses.get(*node).map(|q| {
+            let max = q.iter().cloned().fold(1e-6, f32::max);
+            q.iter().map(|v| (v / max * 100.0) as u64).collect()
+        }).unwrap_or_default();
+        let last = app.losses.get(*node).and_then(|q| q.back()).copied();
+        let label = format!("{node} {}  steps {}", last.map_or("—".to_string(), |l| format!("{l:.4}")), app.steps.get(*node).copied().unwrap_or(0));
+        f.render_widget(Sparkline::default().block(Block::new().title(Span::styled(label, Style::new().fg(cortex_color(node))))).data(&data).max(100).style(Style::new().fg(cortex_color(node))), rows[i]);
+    }
+
+    // Confusion matrix from the teacher.
+    let st = app.teacher.clone().unwrap_or_default();
+    let n = st.per_class.len();
+    let mut lines = vec![];
+    if n > 0 && st.confusion.len() == n {
+        let mut header = vec![Span::styled(format!("{:<10}", "true \\ said"), Style::new().fg(DIM))];
+        for (name, _, _) in &st.per_class { header.push(Span::styled(format!("{:>5}", name.chars().take(4).collect::<String>()), Style::new().fg(Color::Gray))); }
+        header.push(Span::styled("  unk", Style::new().fg(Color::Gray)));
+        lines.push(Line::from(header));
+        for (i, (name, _, _)) in st.per_class.iter().enumerate() {
+            let total: u32 = st.confusion[i].iter().sum();
+            let mut row = vec![Span::styled(format!("{name:<10}"), Style::new().fg(Color::Gray))];
+            for (j, c) in st.confusion[i].iter().enumerate() {
+                let color = if *c == 0 { DIM } else if j == i { Color::LightGreen } else { Color::LightRed };
+                row.push(Span::styled(format!("{:>5}", if *c == 0 && total == 0 { "·".to_string() } else { c.to_string() }), Style::new().fg(color)));
+            }
+            lines.push(Line::from(row));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(" run the teacher (Teach tab) to fill the confusion matrix", Style::new().fg(DIM))));
+    }
+    f.render_widget(Paragraph::new(lines).block(panel(title("confusion matrix · held-out tests"))), right[1]);
 }
 
 // ───────────────────────────── Processes / Train ─────────────────────────────

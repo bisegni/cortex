@@ -81,18 +81,31 @@ Replace the temporary visual sensor with a webcam and a small innate Metal featu
 
 `main` runs the trainable local cortical networks and feeds Visual Cortex from the native macOS camera. Install prerequisites with `brew install rust nats-server`, then run `./scripts/run-seed0.sh`. It builds the workspace and opens the `cortex-tui` dashboard, which starts and supervises `nats-server` (an already-running server on the same port is reused) and every cortex node as child processes. Quitting the dashboard stops them all.
 
-Tabs (`1`-`6`, `Tab`, or `F1`-`F6`): **Brain** (connectome heat, per-cortex neuron activity, workspace stream), **Chat** (type text to the language cortex; brain broadcasts, recalls and associations appear as replies), **Camera** (live downsampled webcam frame from the visual cortex), **Teach** (automatic teacher with live accuracy), **Processes** (status, logs, restart/stop), **Train** (run `cortex-train` and view output; press `R` to restart the nodes and load new weights). `q` twice quits; `Ctrl-C` quits immediately.
+Tabs (`1`-`7`, `Tab`, or `F1`-`F7`): **Brain** (connectome heat, per-cortex neuron activity, workspace stream), **Chat** (type text to the language cortex; brain broadcasts, recalls and associations appear as replies), **Camera** (live downsampled webcam frame from the visual cortex), **Teach** (automatic teacher with live accuracy), **Learn** (what it knows, training loss, sequences, confusion matrix; `d` forget a word, `e` export a snapshot, `i` import the latest), **Processes** (status, logs, restart/stop), **Train** (run `cortex-train` and view output; press `R` to restart the nodes and load new weights). `q` twice quits; `Ctrl-C` quits immediately.
 
 On first camera use, macOS must grant Camera access to the terminal application running the dashboard. If camera 0 is not the intended device, launch with e.g. `CORTEX_CAMERA=1 ./scripts/run-seed0.sh`. Text can also be sent from any shell with `nats pub cortex.input.text "hello"`.
 
 ### Teaching the brain to name what it sees
 
-Signals carry a `ttl` (remaining relay hops) so a stimulus produces a bounded cascade instead of endless echo. The visual cortex uses a fixed innate "retina" (`cortex-core/src/curriculum.rs`: shape summary, width/height profiles, stripe texture) and learns a 16-dim latent from it. The associative cortex links image latents to words Hebbian-style (nearest-prototype vote, persisted in `weights/cortex-0/links.json`). The language cortex publishes the result on `cortex.answer`.
+Signals carry a `ttl` (remaining relay hops) so a stimulus produces a bounded cascade instead of endless echo. The visual cortex reads a fixed innate retina (`cortex-core/src/curriculum.rs`: 64 polarity/position-tolerant shape features plus 64 HOG-lite edge features) and learns a 16-dim latent that is a fixed random projection of it. The associative cortex links image latents to words Hebbian-style (nearest-prototype vote, persisted in `weights/cortex-0/links.json`) and answers `unknown` for images far from anything taught. The language cortex publishes answers on `cortex.answer`; everything the brain says goes to `cortex.say`.
 
-1. **Offline pretrain** (optional but recommended): `cargo run -p cortex-node --bin cortex-train -- curriculum` (or the Train tab) trains visual, perceptual and language nets on generated shapes (`circle square triangle cross hbars vbars`).
-2. **Automatic teacher**: Teach tab, press `t`. It says a class name on `cortex.input.text` while injecting generated images on `cortex.visual.inject`, and periodically tests unseen images without the word, scoring the answers.
-3. **Headless check**: with nats-server and all nodes running, `cargo run -p cortex-node --bin cortex-teacher -- --headless --episodes 120 --target 0.8` prints per-class accuracy and exits non-zero below target. Set `CORTEX_CAMERA=off` on the visual node to keep the camera out of the test.
-4. **Teach it yourself**: show the camera an object and type its name in Chat; later show it again and the answer appears as "I see: ...".
+**Talking to it (Chat tab).** Show the camera something and type its name (`this is a cup`, or just `cup`). Ask `what is this?`, `what did you see?`, `what comes next?`; say `forget cup`; answer `yes`/`no` when it asks. Parsing is rule based (`cortex-core/src/intent.rs`).
+
+**Taking initiative.** The workspace node watches what the brain perceives and speaks unprompted, with cooldowns: it notices known things (`I see cup.`), asks `What is this?` when something unknown stays in view for 2 s, asks `Is this cup?` when unsure (your yes/no then reinforces or weakens the word), and says `I expected square but saw cross.` when a learned sequence breaks. The memory node recalls an earlier episode when you have been silent for `CORTEX_IDLE_SECS` (default 90). `CORTEX_PROACTIVE=off` silences all of it.
+
+**Memory and prediction.** The memory node logs what it recognised (`weights/cortex-0/episodes.json`); the associative cortex learns first-order word-to-word transitions and publishes expectations on `cortex.prediction`.
+
+**Training it.**
+
+1. **Offline pretrain** (recommended): `cargo run -p cortex-node --bin cortex-train -- curriculum` (or the Train tab) trains the visual, perceptual and language nets on generated shapes (`circle square triangle cross hbars vbars`).
+2. **Automatic teacher**: Teach tab, `t` to start/stop, `g` to switch mode, `s` for speed. Synthetic mode says a class name while injecting generated images, and periodically tests unseen images plus one never-taught shape (`ring`, which should be called unknown). Camera mode is guided: it prompts `Show me: cup`, repeats the name while the camera streams, then tests you (`CORTEX_WORDS=hand,cup` sets the words).
+3. **Headless checks** (nats-server and all nodes running; set `CORTEX_CAMERA=off` on the visual node to keep the camera out of it):
+   - `cortex-teacher --headless --episodes 120 --target 0.8` — synthetic shapes, per-class accuracy and unknown rejection.
+   - `cortex-teacher --headless --images DIR` — `DIR/<label>/*.png|jpg`, every 5th image held out.
+   - `cortex-teacher --headless --mode sequence --seq circle,square,cross` — next-item prediction and surprise detection.
+   - `cortex-teacher --mode camera --words cup,phone` — guided real objects.
+
+Reference results on this machine: synthetic shapes 100% held-out with 4/4 unknown rejection; sequence prediction 9/9 with 3/3 surprises; a stylised photo set (coloured backgrounds, rotation, blur) around 70-75%, so real-object accuracy depends on framing and lighting.
 
 ## Inter-cortical learning
 

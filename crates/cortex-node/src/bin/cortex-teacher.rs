@@ -130,6 +130,8 @@ impl Teacher {
         self.status.last_answer = answer.to_string();
         self.status.last_confidence = confidence;
         if !ok { println!("  miss: {} -> {}", self.classes[class], answer); }
+        let col = self.classes.iter().position(|c| c == answer).unwrap_or(self.classes.len());
+        if let Some(row) = self.status.confusion.get_mut(class) { if let Some(cell) = row.get_mut(col) { *cell += 1; } }
         let row = &mut self.status.per_class[class];
         row.2 += 1;
         if ok { row.1 += 1; }
@@ -348,7 +350,7 @@ async fn main() -> Result<()> {
     };
     let mut t = Teacher {
         nc, answers, predictions, rng: 0x7EAC4E5, speed: args.speed, test_seed: 0, teach_secs: 5.0 / args.speed,
-        status: TeacherStatus { per_class: classes.iter().map(|c| (c.clone(), 0, 0)).collect(), mode: mode_name.into(), ..Default::default() },
+        status: TeacherStatus { per_class: classes.iter().map(|c| (c.clone(), 0, 0)).collect(), mode: mode_name.into(), confusion: vec![vec![0; classes.len() + 1]; classes.len()], ..Default::default() },
         classes, source,
     };
     println!("teacher ({mode_name}): {} classes: {}", t.classes.len(), t.classes.join(", "));
@@ -392,6 +394,7 @@ async fn main() -> Result<()> {
     // Final evaluation on fresh held-out images.
     for row in &mut t.status.per_class { row.1 = 0; row.2 = 0; }
     t.status.novel = (0, 0);
+    for row in &mut t.status.confusion { row.iter_mut().for_each(|c| *c = 0); }
     let mut right = 0;
     for _ in 0..args.rounds { right += if camera { t.test_camera().await? } else { t.test_round().await? }; }
     let total = args.rounds * t.classes.len() as u32;

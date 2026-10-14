@@ -1,5 +1,5 @@
 //! Pure dashboard state, fed by NATS signals and camera frames.
-use cortex_core::{Answer, Frame, Percept, Prediction, Say, Signal, TeacherStatus};
+use cortex_core::{Answer, BrainState, Frame, Metrics, Percept, Prediction, Say, Signal, TeacherStatus};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 
 /// (name, input, hidden, output) of every cortex; matches the geometry in cortex-node.
@@ -15,14 +15,14 @@ pub const TRAIN_TARGETS: &[&str] = &["curriculum", "all", "visual", "perceptual"
 const RATE_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Tab { Brain, Chat, Camera, Teach, Processes, Train }
+pub enum Tab { Brain, Chat, Camera, Teach, Learn, Processes, Train }
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Brain, Tab::Chat, Tab::Camera, Tab::Teach, Tab::Processes, Tab::Train];
+    pub const ALL: [Tab; 7] = [Tab::Brain, Tab::Chat, Tab::Camera, Tab::Teach, Tab::Learn, Tab::Processes, Tab::Train];
     pub fn title(self) -> &'static str {
-        match self { Tab::Brain => "Brain", Tab::Chat => "Chat", Tab::Camera => "Camera", Tab::Teach => "Teach", Tab::Processes => "Processes", Tab::Train => "Train" }
+        match self { Tab::Brain => "Brain", Tab::Chat => "Chat", Tab::Camera => "Camera", Tab::Teach => "Teach", Tab::Learn => "Learn", Tab::Processes => "Processes", Tab::Train => "Train" }
     }
     pub fn index(self) -> usize { Tab::ALL.iter().position(|t| *t == self).unwrap_or(0) }
-    pub fn step(self, d: isize) -> Tab { Tab::ALL[(self.index() as isize + d).rem_euclid(6) as usize] }
+    pub fn step(self, d: isize) -> Tab { Tab::ALL[(self.index() as isize + d).rem_euclid(7) as usize] }
 }
 
 pub enum Who { You, Brain(String), System }
@@ -61,6 +61,13 @@ pub struct App {
     pub teach_speed: u32,
     pub said: VecDeque<Say>,
     pub percept: Option<(String, f32, Instant)>,
+    /// Recent training loss per node, newest last.
+    pub losses: HashMap<String, VecDeque<f32>>,
+    pub steps: HashMap<String, u64>,
+    pub brain: Option<BrainState>,
+    pub learn_sel: usize,
+    /// Status line for export/import/forget feedback on the Learn tab.
+    pub learn_note: String,
     /// (from, expected next, confidence, when) — cleared by a surprise.
     pub expecting: Option<(String, String, f32, Instant)>,
     /// Teach tab: false = generated shapes, true = guided camera objects.
@@ -74,7 +81,7 @@ impl App {
             tab: Tab::Brain, edges: HashMap::new(), cortex: HashMap::new(), signals: VecDeque::new(), thoughts: VecDeque::new(),
             chat: vec![ChatLine { who: Who::System, text: "Show the camera something and say what it is ('this is a cup'). Ask 'what is this?', 'what did you see?' or 'what comes next?'. Answer yes/no when it asks.".into() }],
             input: String::new(), frame: None, frame_times: VecDeque::new(), last_frame: None, msg_times: VecDeque::new(),
-            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, said: VecDeque::new(), percept: None, expecting: None, teach_camera: false, teach_words: std::env::var("CORTEX_WORDS").unwrap_or_else(|_| "hand,cup".into()),
+            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, said: VecDeque::new(), percept: None, losses: HashMap::new(), steps: HashMap::new(), brain: None, learn_sel: 0, learn_note: String::new(), expecting: None, teach_camera: false, teach_words: std::env::var("CORTEX_WORDS").unwrap_or_else(|_| "hand,cup".into()),
         }
     }
 
@@ -107,6 +114,22 @@ impl App {
         self.chat.push(ChatLine { who: Who::Brain(s.kind.clone()), text: s.text.clone() });
         if self.chat.len() > 500 { self.chat.remove(0); }
         push_cap(&mut self.said, s, 20);
+    }
+
+    pub fn on_metrics(&mut self, m: Metrics) {
+        let q = self.losses.entry(m.node.clone()).or_default();
+        q.push_back(m.loss);
+        if q.len() > 60 { q.pop_front(); }
+        self.steps.insert(m.node, m.steps);
+    }
+
+    pub fn on_brain_state(&mut self, b: BrainState) {
+        self.learn_sel = self.learn_sel.min(b.words.len().saturating_sub(1));
+        self.brain = Some(b);
+    }
+
+    pub fn selected_word(&self) -> Option<&str> {
+        self.brain.as_ref().and_then(|b| b.words.get(self.learn_sel)).map(|w| w.0.as_str())
     }
 
     pub fn on_percept(&mut self, p: Percept) { self.percept = Some((p.word, p.confidence, Instant::now())); }
@@ -198,6 +221,17 @@ mod tests {
         assert!(a.expecting.is_some());
         a.on_prediction(Prediction { from: "a".into(), next: "b".into(), confidence: 0.8, got: Some("c".into()) });
         assert!(a.expecting.is_none());
+    }
+
+    #[test]
+    fn learn_state_tracks_losses_and_selection() {
+        let mut a = App::new();
+        for i in 0..70 { a.on_metrics(Metrics { node: "visual".into(), loss: i as f32, steps: i }); }
+        assert_eq!(a.losses["visual"].len(), 60);
+        assert_eq!(a.steps["visual"], 69);
+        a.learn_sel = 5;
+        a.on_brain_state(BrainState { words: vec![("cup".into(), 3, 9.0), ("hand".into(), 2, 4.0)], ..Default::default() });
+        assert_eq!(a.selected_word(), Some("hand"));
     }
 
     #[test]

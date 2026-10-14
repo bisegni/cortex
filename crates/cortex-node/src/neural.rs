@@ -68,3 +68,17 @@ impl Prototypes {
         }
     }
 }
+
+/// Averages training loss and reports it every 2 s (for the dashboard's Learn tab).
+pub struct Meter { sum: f32, n: u32, steps: u64, last: std::time::Instant }
+impl Meter {
+    pub fn new() -> Self { Self { sum: 0.0, n: 0, steps: 0, last: std::time::Instant::now() } }
+    pub fn add(&mut self, loss: f32) { self.sum += loss; self.n += 1; self.steps += 1; }
+    /// Some((mean loss, total steps)) when it is time to publish.
+    pub fn due(&mut self) -> Option<(f32, u64)> {
+        if self.n == 0 || self.last.elapsed() < std::time::Duration::from_secs(2) { return None; }
+        let out = (self.sum / self.n as f32, self.steps);
+        self.sum = 0.0; self.n = 0; self.last = std::time::Instant::now();
+        Some(out)
+    }
+}

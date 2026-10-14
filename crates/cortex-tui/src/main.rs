@@ -1,10 +1,11 @@
 mod app;
+mod snapshot;
 mod supervisor;
 mod ui;
 
 use anyhow::{Context, Result};
 use app::{App, Tab, Who, TRAIN_TARGETS};
-use cortex_core::{Answer, Frame, Percept, Prediction, Say, Signal, TeacherStatus, ANSWER_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, PERCEPT_SUBJECT, PREDICTION_SUBJECT, SAY_SUBJECT, TEACHER_STATUS_SUBJECT};
+use cortex_core::{intent::Intent, Answer, BrainState, Frame, Metrics, Percept, Prediction, Say, Signal, TeacherStatus, ANSWER_SUBJECT, BRAIN_STATE_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, INTENT_SUBJECT, METRICS_SUBJECT, PERCEPT_SUBJECT, PREDICTION_SUBJECT, SAY_SUBJECT, TEACHER_STATUS_SUBJECT};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use std::time::Duration;
@@ -31,11 +32,13 @@ async fn main() -> Result<()> {
     let mut teacher = nc.subscribe(TEACHER_STATUS_SUBJECT).await?;
     let mut says = nc.subscribe(SAY_SUBJECT).await?;
     let mut percepts = nc.subscribe(PERCEPT_SUBJECT).await?;
+    let mut metrics = nc.subscribe(METRICS_SUBJECT).await?;
+    let mut brain = nc.subscribe(BRAIN_STATE_SUBJECT).await?;
     let mut predictions = nc.subscribe(PREDICTION_SUBJECT).await?;
 
     // ratatui::init installs a panic hook that restores the terminal.
     let mut term = ratatui::init();
-    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher, says: &mut says, percepts: &mut percepts, predictions: &mut predictions }).await;
+    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher, says: &mut says, percepts: &mut percepts, predictions: &mut predictions, metrics: &mut metrics, brain: &mut brain }).await;
     ratatui::restore();
     sup.shutdown().await;
     result
@@ -49,10 +52,12 @@ struct Feeds<'a> {
     says: &'a mut async_nats::Subscriber,
     percepts: &'a mut async_nats::Subscriber,
     predictions: &'a mut async_nats::Subscriber,
+    metrics: &'a mut async_nats::Subscriber,
+    brain: &'a mut async_nats::Subscriber,
 }
 
 async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &async_nats::Client, feeds: Feeds<'_>) -> Result<()> {
-    let Feeds { signals: sub, frames, answers, teacher, says, percepts, predictions } = feeds;
+    let Feeds { signals: sub, frames, answers, teacher, says, percepts, predictions, metrics, brain } = feeds;
     let mut app = App::new();
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -77,6 +82,14 @@ async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &asy
             msg = answers.next() => {
                 let Some(msg) = msg else { break };
                 if let Ok(a) = serde_json::from_slice::<Answer>(&msg.payload) { app.on_answer(a); }
+            }
+            msg = metrics.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(x) = serde_json::from_slice::<Metrics>(&msg.payload) { app.on_metrics(x); }
+            }
+            msg = brain.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(x) = serde_json::from_slice::<BrainState>(&msg.payload) { app.on_brain_state(x); }
             }
             msg = percepts.next() => {
                 let Some(msg) = msg else { break };
@@ -113,7 +126,7 @@ async fn handle_key(app: &mut App, sup: &mut Supervisor, nc: &async_nats::Client
     match k.code {
         KeyCode::Tab => { app.tab = app.tab.step(1); return false; }
         KeyCode::BackTab => { app.tab = app.tab.step(-1); return false; }
-        KeyCode::F(n @ 1..=6) => { app.tab = Tab::ALL[n as usize - 1]; return false; }
+        KeyCode::F(n @ 1..=7) => { app.tab = Tab::ALL[n as usize - 1]; return false; }
         _ => {}
     }
     if app.tab == Tab::Chat {
@@ -144,16 +157,18 @@ async fn handle_key(app: &mut App, sup: &mut Supervisor, nc: &async_nats::Client
             if was_armed { return true; }
             app.quit_armed = true;
         }
-        KeyCode::Char(c @ '1'..='6') => app.tab = Tab::ALL[c as usize - '1' as usize],
+        KeyCode::Char(c @ '1'..='7') => app.tab = Tab::ALL[c as usize - '1' as usize],
         KeyCode::Char('R') => sup.restart_nodes().await,
         KeyCode::Char('j') | KeyCode::Down => match app.tab {
             Tab::Processes => app.selected_proc = (app.selected_proc + 1).min(sup.train_index() - 1),
             Tab::Train => app.train_sel = (app.train_sel + 1).min(TRAIN_TARGETS.len() - 1),
+            Tab::Learn => app.learn_sel += 1,
             _ => {}
         },
         KeyCode::Char('k') | KeyCode::Up => match app.tab {
             Tab::Processes => app.selected_proc = app.selected_proc.saturating_sub(1),
             Tab::Train => app.train_sel = app.train_sel.saturating_sub(1),
+            Tab::Learn => app.learn_sel = app.learn_sel.saturating_sub(1),
             _ => {}
         },
         KeyCode::Enter => match app.tab {
@@ -178,6 +193,20 @@ async fn handle_key(app: &mut App, sup: &mut Supervisor, nc: &async_nats::Client
                 sup.start(i, args).await;
             }
         }
+        KeyCode::Char('d') if app.tab == Tab::Learn => {
+            if let Some(w) = app.selected_word().map(str::to_string) {
+                let _ = nc.publish(INTENT_SUBJECT, serde_json::to_vec(&Intent::Forget(w.clone())).unwrap_or_default().into()).await;
+                app.learn_note = format!("forgot {w}");
+            }
+        }
+        KeyCode::Char('e') if app.tab == Tab::Learn => app.learn_note = match snapshot::export(sup.root()) {
+            Ok(p) => format!("exported to {}", p.display()),
+            Err(e) => format!("export failed: {e}"),
+        },
+        KeyCode::Char('i') if app.tab == Tab::Learn => match snapshot::import_latest(sup.root()) {
+            Ok(p) => { sup.restart_nodes().await; app.learn_note = format!("imported {} and restarted nodes", p.display()); }
+            Err(e) => app.learn_note = format!("import failed: {e}"),
+        },
         KeyCode::Char('g') if app.tab == Tab::Teach => app.teach_camera = !app.teach_camera,
         KeyCode::Char('s') if app.tab == Tab::Teach => app.teach_speed = match app.teach_speed { 1 => 2, 2 => 4, _ => 1 },
         _ => {}

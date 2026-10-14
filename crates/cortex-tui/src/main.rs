@@ -4,7 +4,7 @@ mod ui;
 
 use anyhow::{Context, Result};
 use app::{App, Tab, Who, TRAIN_TARGETS};
-use cortex_core::{Answer, Frame, Signal, TeacherStatus, ANSWER_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, TEACHER_STATUS_SUBJECT};
+use cortex_core::{Answer, Frame, Say, Signal, TeacherStatus, ANSWER_SUBJECT, FRAME_SUBJECT, INPUT_TEXT, SAY_SUBJECT, TEACHER_STATUS_SUBJECT};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use std::time::Duration;
@@ -29,10 +29,11 @@ async fn main() -> Result<()> {
     let mut frames = nc.subscribe(FRAME_SUBJECT).await?;
     let mut answers = nc.subscribe(ANSWER_SUBJECT).await?;
     let mut teacher = nc.subscribe(TEACHER_STATUS_SUBJECT).await?;
+    let mut says = nc.subscribe(SAY_SUBJECT).await?;
 
     // ratatui::init installs a panic hook that restores the terminal.
     let mut term = ratatui::init();
-    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher }).await;
+    let result = run(&mut term, &mut sup, &nc, Feeds { signals: &mut sub, frames: &mut frames, answers: &mut answers, teacher: &mut teacher, says: &mut says }).await;
     ratatui::restore();
     sup.shutdown().await;
     result
@@ -43,10 +44,11 @@ struct Feeds<'a> {
     frames: &'a mut async_nats::Subscriber,
     answers: &'a mut async_nats::Subscriber,
     teacher: &'a mut async_nats::Subscriber,
+    says: &'a mut async_nats::Subscriber,
 }
 
 async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &async_nats::Client, feeds: Feeds<'_>) -> Result<()> {
-    let Feeds { signals: sub, frames, answers, teacher } = feeds;
+    let Feeds { signals: sub, frames, answers, teacher, says } = feeds;
     let mut app = App::new();
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -71,6 +73,10 @@ async fn run(term: &mut ratatui::DefaultTerminal, sup: &mut Supervisor, nc: &asy
             msg = answers.next() => {
                 let Some(msg) = msg else { break };
                 if let Ok(a) = serde_json::from_slice::<Answer>(&msg.payload) { app.on_answer(a); }
+            }
+            msg = says.next() => {
+                let Some(msg) = msg else { break };
+                if let Ok(t) = serde_json::from_slice::<Say>(&msg.payload) { app.on_say(t); }
             }
             msg = teacher.next() => {
                 let Some(msg) = msg else { break };
@@ -152,9 +158,15 @@ async fn handle_key(app: &mut App, sup: &mut Supervisor, nc: &async_nats::Client
             if sup.procs[i].is_up() {
                 sup.stop(i);
             } else {
-                sup.start(i, vec!["--speed".into(), app.teach_speed.to_string()]).await;
+                let args = if app.teach_camera {
+                    vec!["--mode".into(), "camera".into(), "--words".into(), app.teach_words.clone()]
+                } else {
+                    vec!["--speed".into(), app.teach_speed.to_string()]
+                };
+                sup.start(i, args).await;
             }
         }
+        KeyCode::Char('g') if app.tab == Tab::Teach => app.teach_camera = !app.teach_camera,
         KeyCode::Char('s') if app.tab == Tab::Teach => app.teach_speed = match app.teach_speed { 1 => 2, 2 => 4, _ => 1 },
         _ => {}
     }

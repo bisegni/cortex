@@ -23,7 +23,7 @@ fn main()->Result<()>{
         println!("saved {path}; final local loss {loss:0.6}"); Ok(())
     };
     match cortex.as_str(){
-      "visual"=>one("visual",64,48,0x715A1,0.006)?,
+      "visual"=>one("visual",128,64,0x715A1,0.006)?,
       "perceptual"=>one("perceptual",16,24,0x9E2C,0.008)?,
       "memory"=>one("memory",16,32,0x4D454D,0.006)?,
       "associative"=>{
@@ -38,15 +38,15 @@ fn main()->Result<()>{
           let mut loss=0.; for i in 0..steps {let x=sensory_vector(corpus[i%corpus.len()].as_bytes(),32);loss=net.train(&x,&fit(&x,16));}
           net.save("weights/cortex-0/language.bin")?; println!("saved weights/cortex-0/language.bin; loss {loss:0.6}");
       },
-      "all"=>{ for (name,input,hidden,seed,lr) in [("visual",64,48,0x715A1,0.006),("perceptual",16,24,0x9E2C,0.008),("memory",16,32,0x4D454D,0.006)] {one(name,input,hidden,seed,lr)?;} 
+      "all"=>{ for (name,input,hidden,seed,lr) in [("visual",128,64,0x715A1,0.006),("perceptual",16,24,0x9E2C,0.008),("memory",16,32,0x4D454D,0.006)] {one(name,input,hidden,seed,lr)?;} 
           std::process::Command::new(std::env::current_exe()?).arg("associative").status()?; std::process::Command::new(std::env::current_exe()?).arg("language").status()?;
       },
       "curriculum"=>{
-          // Visual learns to predict the global shape summary of the innate retina features of generated images; perceptual autoencodes the visual latents; language learns the class words.
+          // Visual learns to predict a fixed random projection of the innate retina features of generated images; perceptual autoencodes the visual latents; language learns the class words.
           use cortex_core::curriculum::{self,CLASSES};
           println!("training curriculum: {} classes, {steps} steps", CLASSES.len());
-          let mut vis=NeuralNet::new(64,48,16,0x715A1,0.05); let mut loss=0.;
-          for i in 0..steps { let f=curriculum::render(i%CLASSES.len(),i as u64); let x=curriculum::retina(&f); loss=vis.train(&x,&curriculum::summary(&x)); }
+          let mut vis=NeuralNet::new(128,64,16,0x715A1,0.05); let mut loss=0.;
+          for i in 0..steps { let f=curriculum::render(i%CLASSES.len(),i as u64); let x=curriculum::retina(&f); loss=vis.train(&x,&curriculum::latent_target(&x)); }
           vis.save("weights/cortex-0/visual.bin")?; println!("saved visual; final loss {loss:0.6}");
           let mut per=NeuralNet::new(16,24,16,0x9E2C,0.02); let mut loss=0.;
           for i in 0..steps { let f=curriculum::render(i%CLASSES.len(),(i as u64)^0xABCD); let x=curriculum::retina(&f); let (_,emb)=vis.forward(&x); loss=per.train(&emb,&emb); }

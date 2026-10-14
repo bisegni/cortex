@@ -4,6 +4,8 @@ use crate::Frame;
 pub const WIDTH: usize = 64;
 pub const HEIGHT: usize = 32;
 pub const CLASSES: [&str; 6] = ["circle", "square", "triangle", "cross", "hbars", "vbars"];
+/// Never taught: the brain should answer "unknown" for these.
+pub const NOVEL: [&str; 1] = ["ring"];
 
 /// Seeds at or above this value are reserved for held-out test images.
 pub const TEST_SEED_BASE: u64 = 1_000_000;
@@ -24,7 +26,8 @@ fn inside(class: usize, dx: i32, dy: i32, r: i32) -> bool {
         2 => dy >= -r && dy <= r && dx.abs() <= (dy + r) / 2,
         3 => (dx.abs() <= r / 3 && dy.abs() <= r) || (dy.abs() <= r / 3 && dx.abs() <= r),
         4 => dx.abs() <= r * 3 / 2 && dy.abs() <= r && (dy + r).rem_euclid(4) < 2,
-        _ => dx.abs() <= r * 3 / 2 && dy.abs() <= r && (dx + r * 2).rem_euclid(4) < 2,
+        5 => dx.abs() <= r * 3 / 2 && dy.abs() <= r && (dx + r * 2).rem_euclid(4) < 2,
+        _ => dx * dx + dy * dy <= r * r && dx * dx + dy * dy >= (r * 2 / 3) * (r * 2 / 3),
     }
 }
 
@@ -46,17 +49,65 @@ pub fn render(class: usize, seed: u64) -> Frame {
     Frame { width: WIDTH, height: HEIGHT, gray }
 }
 
-/// Innate "retina": a fixed feature extractor turning a frame into the 64-dim visual cortex input.
-/// Features are measured on the bright mask relative to its bounding box, so they are largely
-/// invariant to position, size and brightness (shape summary, width/height profiles, stripe texture).
+/// Length of the visual cortex input vector.
+pub const RETINA_DIMS: usize = 128;
+
+/// Innate "retina": a fixed feature extractor turning a frame into the 128-dim visual cortex input:
+/// 64 mask-shape features (largely invariant to position, size, brightness) followed by 64 HOG-lite
+/// edge-orientation features that carry texture and contour for real photographs.
 pub fn retina(frame: &Frame) -> Vec<f32> {
+    let mut out = shape_features(frame);
+    out.extend(hog(frame));
+    out
+}
+
+/// Gradient orientation histograms (8 bins) over a 4x2 grid of cells, each L1-normalised.
+pub fn hog(frame: &Frame) -> Vec<f32> {
+    let (w, h) = (frame.width, frame.height);
+    let mut out = vec![-1.0f32; 64];
+    if w < 8 || h < 8 || frame.gray.len() < w * h { return out; }
+    let g = |x: usize, y: usize| frame.gray[y * w + x] as f32;
+    let (cw, ch) = (w / 4, h / 2);
+    let mut hist = [[0f32; 8]; 8];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let (dx, dy) = (g(x + 1, y) - g(x - 1, y), g(x, y + 1) - g(x, y - 1));
+            let mag = (dx * dx + dy * dy).sqrt();
+            if mag < 1.0 { continue; }
+            let angle = dy.atan2(dx).rem_euclid(std::f32::consts::PI);
+            let bin = ((angle / std::f32::consts::PI * 8.0) as usize).min(7);
+            hist[(y / ch).min(1) * 4 + (x / cw).min(3)][bin] += mag;
+        }
+    }
+    for (c, bins) in hist.iter().enumerate() {
+        let total: f32 = bins.iter().sum();
+        if total < 50.0 { continue; }
+        for (b, v) in bins.iter().enumerate() { out[c * 8 + b] = (v / total * 2.0 - 1.0).clamp(-1.0, 1.0); }
+    }
+    out
+}
+
+/// Fixed random projection of the retina to the 16-dim latent the visual cortex learns to predict.
+/// (Distances are roughly preserved, so image similarity survives the compression.)
+pub fn latent_target(retina_out: &[f32]) -> Vec<f32> {
+    static R: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let r = R.get_or_init(|| {
+        let mut rng = Rng(0xC0FFEE);
+        (0..16 * RETINA_DIMS).map(|_| ((rng.next() % 2001) as f32 / 1000.0 - 1.0) * 0.25).collect()
+    });
+    (0..16).map(|k| (0..RETINA_DIMS).map(|i| r[k * RETINA_DIMS + i] * retina_out.get(i).copied().unwrap_or(-1.0)).sum::<f32>().tanh()).collect()
+}
+
+fn shape_features(frame: &Frame) -> Vec<f32> {
     let (w, h) = (frame.width, frame.height);
     let mut out = vec![-1.0f32; 64];
     if w == 0 || h == 0 || frame.gray.len() < w * h { return out; }
     let (mn, mx) = frame.gray.iter().fold((255u8, 0u8), |(a, b), v| (a.min(*v), b.max(*v)));
     if mx.saturating_sub(mn) < 40 { return out; }
     let thr = ((mn as u16 + mx as u16) / 2) as u8;
-    let on = |x: usize, y: usize| frame.gray[y * w + x] > thr;
+    // The object is the minority side of the threshold, whether it is bright-on-dark or dark-on-bright.
+    let invert = frame.gray.iter().filter(|v| **v > thr).count() * 2 > w * h;
+    let on = |x: usize, y: usize| (frame.gray[y * w + x] > thr) != invert;
     let (mut x0, mut x1, mut y0, mut y1, mut area) = (w, 0, h, 0, 0usize);
     let (mut sx, mut sy) = (0f32, 0f32);
     for y in 0..h { for x in 0..w { if on(x, y) { x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); area += 1; sx += x as f32; sy += y as f32; } } }
@@ -101,8 +152,6 @@ pub fn retina(frame: &Frame) -> Vec<f32> {
     out
 }
 
-/// What the visual cortex learns to predict from its input: the 16 global shape features.
-pub fn summary(retina_out: &[f32]) -> Vec<f32> { retina_out[..16].to_vec() }
 
 #[cfg(test)]
 mod tests {
@@ -132,9 +181,18 @@ mod tests {
     }
 
     #[test]
+    fn shape_features_ignore_polarity() {
+        let f = render(1, 5);
+        let inverted = Frame { gray: f.gray.iter().map(|v| 255 - v).collect(), ..f.clone() };
+        let (a, b) = (shape_features(&f), shape_features(&inverted));
+        let d: f32 = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f32>() / a.len() as f32;
+        assert!(d < 0.05, "dark-on-bright should look like bright-on-dark, mean diff {d}");
+    }
+
+    #[test]
     fn retina_has_64_dims() {
-        assert_eq!(retina(&render(2, 1)).len(), 64);
-        assert_eq!(summary(&retina(&render(2, 1))).len(), 16);
+        assert_eq!(retina(&render(2, 1)).len(), RETINA_DIMS);
+        assert_eq!(latent_target(&retina(&render(2, 1))).len(), 16);
     }
 }
 
@@ -156,7 +214,7 @@ mod knn_check {
     }
     #[test]
     fn retina_knn_accuracy() {
-        println!("summary knn {:.2}", acc(|f| summary(&retina(f)), 30, 5));
+        println!("latent knn {:.2}", acc(|f| latent_target(&retina(f)), 30, 5));
         let a = acc(retina, 30, 5);
         println!("retina knn {a:.2}");
         assert!(a > 0.9, "retina features must be linearly-ish separable by knn, got {a}");

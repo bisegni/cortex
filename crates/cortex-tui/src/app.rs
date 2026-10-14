@@ -1,10 +1,10 @@
 //! Pure dashboard state, fed by NATS signals and camera frames.
-use cortex_core::{Answer, Frame, Signal, TeacherStatus};
+use cortex_core::{Answer, Frame, Say, Signal, TeacherStatus};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 
 /// (name, input, hidden, output) of every cortex; matches the geometry in cortex-node.
 pub const CORTICES: &[(&str, usize, usize, usize)] = &[
-    ("visual", 64, 48, 16),
+    ("visual", 128, 64, 16),
     ("perceptual", 16, 24, 16),
     ("memory", 16, 32, 16),
     ("associative", 32, 32, 16),
@@ -59,6 +59,10 @@ pub struct App {
     pub teacher_seen: Option<Instant>,
     pub last_answer: Option<(String, f32, Instant)>,
     pub teach_speed: u32,
+    pub said: VecDeque<Say>,
+    /// Teach tab: false = generated shapes, true = guided camera objects.
+    pub teach_camera: bool,
+    pub teach_words: String,
     last_chat: HashMap<String, (String, Instant)>,
 }
 
@@ -68,7 +72,7 @@ impl App {
             tab: Tab::Brain, edges: HashMap::new(), cortex: HashMap::new(), signals: VecDeque::new(), thoughts: VecDeque::new(),
             chat: vec![ChatLine { who: Who::System, text: "Type a sentence and press Enter. The language cortex hears it; replies are what the brain broadcasts, recalls or associates.".into() }],
             input: String::new(), frame: None, frame_times: VecDeque::new(), last_frame: None, msg_times: VecDeque::new(),
-            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, last_chat: HashMap::new(),
+            selected_proc: 0, train_sel: 0, started: Instant::now(), quit_armed: false, teacher: None, teacher_seen: None, last_answer: None, teach_speed: 1, said: VecDeque::new(), teach_camera: false, teach_words: std::env::var("CORTEX_WORDS").unwrap_or_else(|_| "hand,cup".into()), last_chat: HashMap::new(),
         }
     }
 
@@ -113,9 +117,17 @@ impl App {
         let now = Instant::now();
         let teaching = self.teacher_seen.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
         if !teaching {
-            self.chat.push(ChatLine { who: Who::Brain("answer".into()), text: format!("I see: {}  ({:.0}% sure)", a.word, a.confidence * 100.0) });
+            let text = if a.word == "unknown" { "I don't recognise this.".to_string() } else { format!("I see: {}  ({:.0}% sure)", a.word, a.confidence * 100.0) };
+            self.chat.push(ChatLine { who: Who::Brain("answer".into()), text });
         }
         self.last_answer = Some((a.word, a.confidence, now));
+    }
+
+    /// Something the brain said on its own initiative or in reply to a question.
+    pub fn on_say(&mut self, s: Say) {
+        self.chat.push(ChatLine { who: Who::Brain(s.kind.clone()), text: s.text.clone() });
+        if self.chat.len() > 500 { self.chat.remove(0); }
+        push_cap(&mut self.said, s, 20);
     }
 
     pub fn on_teacher(&mut self, t: TeacherStatus) {
@@ -194,6 +206,15 @@ mod tests {
         a.on_answer(Answer { word: "square".into(), confidence: 0.5 });
         assert_eq!(a.chat.len(), base + 1);
         assert_eq!(a.last_answer.as_ref().map(|x| x.0.as_str()), Some("square"));
+    }
+
+    #[test]
+    fn say_lands_in_chat_and_inner_voice() {
+        let mut a = App::new();
+        let base = a.chat.len();
+        a.on_say(Say { text: "What is this?".into(), kind: "question".into() });
+        assert_eq!(a.chat.len(), base + 1);
+        assert_eq!(a.said.front().map(|s| s.kind.as_str()), Some("question"));
     }
 
     #[test]

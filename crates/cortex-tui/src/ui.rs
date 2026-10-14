@@ -72,7 +72,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Tab::Brain => "1-6/Tab switch  R restart nodes  q quit",
         Tab::Chat => "type + Enter to speak to the brain   F1-F6/Tab switch   Esc brain   Ctrl-C quit",
         Tab::Camera => "1-6/Tab switch  R restart nodes  q quit",
-        Tab::Teach => "t start/stop teacher  s speed  R restart nodes  q quit",
+        Tab::Teach => "t start/stop teacher  g synthetic/camera mode  s speed  R restart nodes  q quit",
         Tab::Processes => "j/k select  Enter (re)start  x stop  R restart nodes  q quit",
         Tab::Train => "j/k choose  Enter train  R restart nodes (load new weights)  q quit",
     };
@@ -194,6 +194,18 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     chars.chunks(width).map(|c| c.iter().collect()).collect()
 }
 
+fn say_color(kind: &str) -> Color {
+    match kind {
+        "question" => Color::LightYellow,
+        "answer" => Color::LightGreen,
+        "notice" => Color::LightCyan,
+        "memory" => Color::LightMagenta,
+        "prediction" => Color::LightBlue,
+        "info" => Color::Gray,
+        other => cortex_color(other),
+    }
+}
+
 fn chat(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
     let cols = Layout::horizontal([Constraint::Min(30), Constraint::Length(38)]).split(rows[0]);
@@ -204,7 +216,7 @@ fn chat(f: &mut Frame, area: Rect, app: &App) {
     for ChatLine { who, text } in &app.chat {
         let (tag, style) = match who {
             Who::You => ("you ▸ ".to_string(), Style::new().fg(Color::LightCyan).bold()),
-            Who::Brain(s) => (format!("{s} ▸ "), Style::new().fg(cortex_color(s)).bold()),
+            Who::Brain(s) => (format!("{s} ▸ "), Style::new().fg(say_color(s)).bold()),
             Who::System => ("· ".to_string(), Style::new().fg(DIM)),
         };
         let pad = tag.chars().count();
@@ -337,8 +349,12 @@ fn teach(f: &mut Frame, area: Rect, app: &App, sup: &Supervisor) {
     let info = vec![
         Line::from(vec![Span::styled(format!("{:<8}", st.phase), Style::new().fg(Color::LightCyan).bold()), Span::raw(format!(" class: ")), Span::styled(st.class.clone(), Style::new().bold())]),
         Line::from(vec![Span::raw("brain says: "), Span::styled(if st.last_answer.is_empty() { "—".to_string() } else { st.last_answer.clone() }, Style::new().fg(Color::LightGreen).bold()), Span::styled(format!(" ({:.0}%)  ", st.last_confidence * 100.0), Style::new().fg(DIM)), verdict]),
-        Line::from(Span::styled(format!("episode {}   speed x{}", st.episode, app.teach_speed), Style::new().fg(DIM))),
+        Line::from(Span::styled(format!("episode {}   speed x{}   next mode: {}", st.episode, app.teach_speed, if app.teach_camera { format!("camera [{}]", app.teach_words) } else { "synthetic".into() }), Style::new().fg(DIM))),
     ];
+    let mut info = info;
+    if !st.prompt.is_empty() {
+        info.push(Line::from(vec![Span::styled(format!("▶ {}  ", st.prompt), Style::new().fg(Color::Black).bg(Color::LightYellow).bold()), Span::styled(format!(" {:.0}s", st.countdown.ceil()), Style::new().fg(Color::LightYellow).bold())]));
+    }
     f.render_widget(Paragraph::new(info).block(panel(title("teacher"))), left[1]);
 
     let acc = st.accuracy.unwrap_or(0.0);

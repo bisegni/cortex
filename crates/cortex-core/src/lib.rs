@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub mod curriculum;
+pub mod intent;
 
 pub const SYMBOL_DIMS: usize = 16;
 
@@ -47,6 +48,14 @@ pub const FRAME_SUBJECT: &str = "cortex.visual.frame";
 pub const INJECT_SUBJECT: &str = "cortex.visual.inject";
 pub const ANSWER_SUBJECT: &str = "cortex.answer";
 pub const TEACHER_STATUS_SUBJECT: &str = "cortex.teacher.status";
+/// Parsed non-label user intents (`intent::Intent` as JSON).
+pub const INTENT_SUBJECT: &str = "cortex.intent";
+/// Anything the brain says out loud (replies and initiative).
+pub const SAY_SUBJECT: &str = "cortex.say";
+
+/// An utterance. `kind`: answer, question, notice, memory, prediction, info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Say { pub text: String, pub kind: String }
 
 /// What the brain says it sees, published by the language cortex.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +72,14 @@ pub struct TeacherStatus {
     pub last_answer: String, pub last_confidence: f32,
     /// Accuracy of every completed test round.
     pub history: Vec<f32>,
+    /// (rejected, total) for never-taught images the brain should call unknown.
+    pub novel: (u32, u32),
+    /// What the user should do right now in guided camera mode, e.g. "Show me: cup".
+    pub prompt: String,
+    /// Seconds left in the current prompt window.
+    pub countdown: f32,
+    /// Teaching mode: synthetic, camera, images.
+    pub mode: String,
 }
 
 /// Downsampled grayscale camera frame published by the visual cortex for observers.
